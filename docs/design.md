@@ -1,6 +1,6 @@
 # jetcast 设计文档（第一期）
 
-> 状态：第三版，已吸收 codex 与 pi 两轮评审，作为第一期实现规范。发布前整理为英文文档。
+> 状态：第三版，已吸收 codex 与 pi 两轮评审，并按第一期实现同步。发布前整理为英文文档。
 
 ## 1. 定位
 
@@ -64,7 +64,7 @@ JetStream
 5. 读取吊销标记 `x.<user>` 与 `x.<user>.<session>`。标记的写入时间（JetStream 服务端时间）不早于 callout 请求的签发时间 `iat`（NATS 服务端时间，留 2 秒余量）时，说明认证进行期间发生了吊销：把登记标为已吊销并拒绝连接，客户端重试时会重新认证。
 6. 签发 JWT 并回复。
 
-与 `Disconnect` 的竞态由“先写后查”闭合：`Disconnect` 先写吊销标记、再按索引吊销登记；callout 先写登记与索引、再查吊销标记。两者交错时至少有一方能看到另一方的写入。
+与 `Disconnect` 的竞态由“先写后查”闭合：`Disconnect` 先写吊销标记、再按索引吊销登记；callout 先写登记与索引、再查吊销标记。两者交错时至少有一方能看到另一方的写入：要么 callout 拒绝连接，要么 `Disconnect` 吊销刚登记的连接。后一种情况下 JWT 已经签发，没有配置 `ConnectionAdmin` 时只能依靠控制消息与 JWT 过期；应用先使会话失效可以避免客户端再次认证成功。中继在建立后会再读一次登记，已吊销则立即移除。
 
 签发的 JWT：
 
@@ -105,7 +105,7 @@ JetStream
 | `<p>.c.<socket>.ctl` | 发给该连接的控制消息 |
 | `<p>.c.<socket>.r.>` | 请求回复与补发投递（nats.js `inboxPrefix`） |
 | `<p>.rq.<socket>.<op>` | 由任意节点处理的请求：`hello`、`sub`、`heads`、`recover` |
-| `<p>.rq.<socket>.n.<node>.<op>` | 发给指定节点的请求：`renew`、`leave` |
+| `<p>.rq.<socket>.n.<node>.<op>` | 发给指定节点的请求：`renew`、`leave`，以及中继频道的 `heads` |
 | `<p>.sys.>` | 节点之间的控制广播 |
 
 **频道名**：一到八段，每段只允许 `[A-Za-z0-9_-]`，总长不超过 200。客户端提交的永远是字面频道名；`*`、`>` 只出现在服务端的授予模式和频道模式中。
@@ -155,7 +155,7 @@ jetcast 的序号只保证传输层连续，不是业务数据的版本；业务
 - 默认名称 `JETCAST`，主题 `<p>.in.>`，RePublish `<p>.in.>` → `<p>.ev.>`。
 - 只用按年龄与总字节淘汰：默认 `MaxAge` 5 分钟、`MaxBytes` 1 GB、`DiscardOld`；不设每主题条数上限，不允许 rollup、单条删除、按消息 TTL；不开启 AllowDirect；`Duplicates` 2 分钟；文件存储，副本数可配置。
 - epoch 为 stream 创建时间。
-- `Server.Start` 默认只校验 stream 与 KV 配置，不一致时报错；`ManageStreams: true` 时创建或更新。
+- `Server.Start` 默认只校验 stream 与 KV 配置中影响补发正确性的字段（主题、RePublish、淘汰策略、条数上限、AllowDirect、删除与 rollup、Sealed、NoAck、MaxAge），不一致时报错；留存时长等取 stream 的实际配置。`ManageStreams: true` 时创建或更新。
 
 ### 7.2 游标与实时检测
 
@@ -169,26 +169,26 @@ SDK 为每个可补发频道保存游标：`epoch`、`pos`（已确认收齐到�
 
 ### 7.3 补发
 
-SDK 用新的回复主题发送 `recover {channel, epoch, pos, upTo}`；服务端：
+SDK 用新的回复主题发送 `recover {channel, epoch, pos, upTo}`；服务端向回复主题依次发送事件消息（头 `Jetcast-Status: event`），最后发送结果消息（头 `Jetcast-Status: done`，正文为 JSON 结果）。处理步骤：
 
 1. 校验授权（公开频道放行；直接路径看登记中的授予；中继路径看本连接在本节点是否有当前中继，否则执行授权回调）。
 2. epoch 不同：回复 `{recovered: false, reason: "epoch"}`。
 3. 从 `pos + 1` 起按主题逐条读取（leader 路径），每条作为独立消息发到回复主题，带 `Jetcast-Event`、`Jetcast-Id`、`Jetcast-Origin`、`Nats-Sequence`、`Nats-Last-Sequence`（由服务端按读取顺序重建）；直到 `upTo`、本批条数（默认 100）或字节（默认 512 KB，至少一条）上限。
 4. 读完后读取 stream 状态：最早序号 `first > pos + 1` 说明 `pos` 之后已有事件被淘汰，结果不完整，回复 `{recovered: false, reason: "expired"}`；否则回复 `{recovered: true, more, next}`，`next` 是本批最后一条的序号（没有事件时为 `upTo - 1` 或当前最后序号）。
-5. 单次补发累计超过 10000 条或 16 MB 时回复 `{recovered: false, reason: "too_far"}`。
+5. 单次恢复累计超过 10000 条或 16 MB 时，由 SDK 放弃并报告 `{recovered: false, reason: "too_far"}`；服务端只限制每批的条数与字节，单连接的并发请求数另有上限。
 
 SDK 串行处理同一频道的补发与实时事件：补发期间实时事件进入缓冲（上限 1000 条，超出视为 `too_far`）；按批推进游标，`more` 时以 `next` 继续；完成后交付缓冲中序号大于游标的事件。补发失败（`recovered: false`）时，游标重置到服务端给出的当前位置，频道状态报告 `recovered: false` 与原因，由应用重新拉取数据。
 
 ### 7.4 heads：尾部丢失与静默频道
 
-SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有收到实时事件的可补发频道发一次 `heads {channels, epoch}`。服务端按授权回复每个频道的最新序号，以及 stream 的 `first`、`last`、epoch。SDK：
+SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有收到实时事件的可补发频道发一次 `heads {channels, epoch}`：直接订阅的频道发给任意节点，中继频道发给持有中继的节点（该节点只回答本连接在本节点有中继的频道）。服务端按授权回复每个频道的最新序号，以及 stream 的 `first`、`last`、epoch。SDK：
 
 - 频道最新序号大于 `last`：补发 `(pos, 最新序号]`；
 - 相等且 `first <= pos + 1`：没有遗漏，把 `pos` 推进到 stream 的 `last`，使游标不会随时间变旧；
 - `first > pos + 1`：`pos` 之后有事件已被淘汰，无法证明完整，按 `recovered: false, reason: "expired"` 处理；
 - epoch 变化：按 `reason: "epoch"` 处理。
 
-服务端对同一频道的最新序号查询做 1 秒合并。
+服务端每次 heads 请求先读 stream 的最新序号、再读各频道最新序号、最后读最早序号，保证客户端据此推进游标不会越过未收到的事件；同一频道的查询合并留待后续优化。SDK 每批最多 100 个频道。
 
 ### 7.5 Ephemeral 频道
 
