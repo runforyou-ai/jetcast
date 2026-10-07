@@ -1,7 +1,8 @@
 // Package client is the Go client of jetcast, for executors, command-line
 // tools and other non-browser clients. Its API mirrors the TypeScript SDK.
 //
-// A Client keeps one NATS connection at a time. Every connection uses a fresh
+// Event, state and status callbacks run one at a time on a single goroutine,
+// in order; they must return quickly. A Client keeps one NATS connection at a time. Every connection uses a fresh
 // socket ID; when it drops or its credentials near expiry, the client opens a
 // new one and resubscribes every channel, recovering missed events.
 package client
@@ -253,6 +254,16 @@ func (c *Client) setStatusLocked(s Status) {
 	}
 }
 
+// safeCall runs a callback, logging instead of crashing when it panics.
+func (c *Client) safeCall(f func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.log.Error("jetcast: callback panicked", "panic", r)
+		}
+	}()
+	f()
+}
+
 // call queues an application callback; callbacks run one at a time in order.
 func (c *Client) call(f func()) {
 	c.callsMu.Lock()
@@ -271,7 +282,7 @@ func (c *Client) runCalls() {
 		c.calls = nil
 		c.callsMu.Unlock()
 		for _, f := range batch {
-			f()
+			c.safeCall(f)
 		}
 		select {
 		case <-c.ctx.Done():
@@ -281,7 +292,7 @@ func (c *Client) runCalls() {
 			c.calls = nil
 			c.callsMu.Unlock()
 			for _, f := range rest {
-				f()
+				c.safeCall(f)
 			}
 			return
 		case <-c.wake:

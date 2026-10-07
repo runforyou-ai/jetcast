@@ -226,13 +226,14 @@ export class Channel {
     const gen = ++this.gen;
     this.teardown();
     this.conn = conn;
-    this.sid = nuid.next();
+    const newSid = nuid.next();
+    this.sid = newSid;
     this.path = "";
     this.node = "";
     if (this.stateName === "subscribed" || this.stateName === "recovering") {
       this.setState({ state: "interrupted" });
     }
-    void this.attempt(conn, gen);
+    void this.attempt(conn, gen, newSid);
   }
 
   /** Schedules a new attempt after a failure. */
@@ -242,8 +243,8 @@ export class Channel {
     }, 1000 + randInt(1000));
   }
 
-  /** Subscribes on conn: sets up delivery, then asks the server. */
-  private async attempt(conn: Connection, gen: number): Promise<void> {
+  /** Subscribes on conn with the sid bound to generation gen: sets up delivery, then asks the server. */
+  private async attempt(conn: Connection, gen: number, sid: string): Promise<void> {
     let path = PathRelay;
     if (this.kind === "pub" || (conn.hello.grants ?? []).some((p) => matchPattern(p, this.name))) {
       path = PathDirect;
@@ -269,7 +270,7 @@ export class Channel {
       this.direct = sub;
     }
 
-    const sid = this.sid;
+    if (this.gen !== gen) return;
     let resp: SubResponse | undefined;
     let failed = false;
     try {

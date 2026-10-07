@@ -240,7 +240,8 @@ func (s *Subscription) resubscribe(conn *connection, sid string) {
 	s.gen++
 	gen := s.gen
 	s.teardownLocked()
-	s.conn, s.sid, s.path, s.node = conn, nuid.Next(), "", ""
+	newSid := nuid.Next()
+	s.conn, s.sid, s.path, s.node = conn, newSid, "", ""
 	if s.state == StateSubscribed || s.state == StateRecovering {
 		s.setStateLocked(State{State: StateInterrupted})
 	}
@@ -248,7 +249,7 @@ func (s *Subscription) resubscribe(conn *connection, sid string) {
 	if oldConn == conn && oldPath == jetcast.PathRelay {
 		sendLeave(conn, s.c.sub.nodeRequest(conn.socket, oldNode, "leave"), oldSid)
 	}
-	go s.attempt(conn, gen)
+	go s.attempt(conn, gen, newSid)
 }
 
 // retryLater schedules a new attempt after a failure.
@@ -265,8 +266,9 @@ func (s *Subscription) retryLater(conn *connection, gen int) {
 	})
 }
 
-// attempt subscribes on conn: it sets up delivery, then asks the server.
-func (s *Subscription) attempt(conn *connection, gen int) {
+// attempt subscribes on conn with the sid bound to generation gen: it sets
+// up delivery, then asks the server. A stale attempt never uses a newer sid.
+func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 	path := jetcast.PathRelay
 	if s.ch.Kind == jetcast.KindPublic || granted(conn, s.ch.Name) {
 		path = jetcast.PathDirect
@@ -301,8 +303,11 @@ func (s *Subscription) attempt(conn *connection, gen int) {
 	}
 
 	s.mu.Lock()
-	sid := s.sid
+	stale := s.gen != gen
 	s.mu.Unlock()
+	if stale {
+		return
+	}
 	ctx, cancel := context.WithTimeout(s.c.ctx, 10*time.Second)
 	var resp jetcast.SubResponse
 	err := request(ctx, conn.nc, s.c.sub.request(conn.socket, "sub"),
