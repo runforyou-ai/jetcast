@@ -2,7 +2,9 @@
 // tools and other non-browser clients. Its API mirrors the TypeScript SDK.
 //
 // Event, state and status callbacks run one at a time on a single goroutine,
-// in order; they must return quickly. A Client keeps one NATS connection at a time. Every connection uses a fresh
+// in order; they must return quickly.
+//
+// A Client keeps one NATS connection at a time. Every connection uses a fresh
 // socket ID; when it drops or its credentials near expiry, the client opens a
 // new one and resubscribes every channel, recovering missed events.
 package client

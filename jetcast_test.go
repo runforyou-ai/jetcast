@@ -908,3 +908,24 @@ func TestCloseFromCallback(t *testing.T) {
 		t.Fatal("Close from a callback did not return")
 	}
 }
+
+func TestPanickingListener(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	srv := h.node()
+	a := h.client("alice:s1")
+	got := make(chan string, 1)
+	s := a.Channel("news").
+		Listen("boom", func(client.Event) { panic("listener failure") }).
+		Listen("ok", func(e client.Event) { got <- string(e.Data) })
+	ready(t, s)
+	h.broadcast(srv, "boom", "1", jetcast.Public("news"))
+	h.broadcast(srv, "ok", "2", jetcast.Public("news"))
+	select {
+	case v := <-got:
+		if v != "2" {
+			t.Fatal(v)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("client stopped delivering after a listener panicked")
+	}
+}
