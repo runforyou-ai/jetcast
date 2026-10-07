@@ -1,0 +1,22 @@
+version: "2"
+linters:
+  enable:
+    - errorlint
+    - gocritic
+    - misspell
+    - revive
+    - unconvert
+  settings:
+    revive:
+      rules:
+        - name: exported
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, gocritic]
+      - path: (example|cmd/)
+        linters: [errcheck, gocritic]
+formatters:
+  enable:
+    - gofmt
+    - goimports

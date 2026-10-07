@@ -1,6 +1,6 @@
 # jetcast 设计文档（第一期）
 
-> 状态：第三版，已吸收 codex 与 pi 两轮评审，作为第一期实现规范。发布前整理为英文文档。
+> 状态：第三版，已吸收 codex 与 pi 两轮评审，并按第一期实现同步。发布前整理为英文文档。
 
 ## 1. 定位
 
@@ -105,7 +105,7 @@ JetStream
 | `<p>.c.<socket>.ctl` | 发给该连接的控制消息 |
 | `<p>.c.<socket>.r.>` | 请求回复与补发投递（nats.js `inboxPrefix`） |
 | `<p>.rq.<socket>.<op>` | 由任意节点处理的请求：`hello`、`sub`、`heads`、`recover` |
-| `<p>.rq.<socket>.n.<node>.<op>` | 发给指定节点的请求：`renew`、`leave` |
+| `<p>.rq.<socket>.n.<node>.<op>` | 发给指定节点的请求：`renew`、`leave`，以及中继频道的 `heads` |
 | `<p>.sys.>` | 节点之间的控制广播 |
 
 **频道名**：一到八段，每段只允许 `[A-Za-z0-9_-]`，总长不超过 200。客户端提交的永远是字面频道名；`*`、`>` 只出现在服务端的授予模式和频道模式中。
@@ -169,7 +169,7 @@ SDK 为每个可补发频道保存游标：`epoch`、`pos`（已确认收齐到�
 
 ### 7.3 补发
 
-SDK 用新的回复主题发送 `recover {channel, epoch, pos, upTo}`；服务端：
+SDK 用新的回复主题发送 `recover {channel, epoch, pos, upTo}`；服务端向回复主题依次发送事件消息（头 `Jetcast-Status: event`），最后发送结果消息（头 `Jetcast-Status: done`，正文为 JSON 结果）。处理步骤：
 
 1. 校验授权（公开频道放行；直接路径看登记中的授予；中继路径看本连接在本节点是否有当前中继，否则执行授权回调）。
 2. epoch 不同：回复 `{recovered: false, reason: "epoch"}`。
@@ -181,7 +181,7 @@ SDK 串行处理同一频道的补发与实时事件：补发期间实时事件�
 
 ### 7.4 heads：尾部丢失与静默频道
 
-SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有收到实时事件的可补发频道发一次 `heads {channels, epoch}`。服务端按授权回复每个频道的最新序号，以及 stream 的 `first`、`last`、epoch。SDK：
+SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有收到实时事件的可补发频道发一次 `heads {channels, epoch}`：直接订阅的频道发给任意节点，中继频道发给持有中继的节点（该节点只回答本连接在本节点有中继的频道）。服务端按授权回复每个频道的最新序号，以及 stream 的 `first`、`last`、epoch。SDK：
 
 - 频道最新序号大于 `last`：补发 `(pos, 最新序号]`；
 - 相等且 `first <= pos + 1`：没有遗漏，把 `pos` 推进到 stream 的 `last`，使游标不会随时间变旧；
