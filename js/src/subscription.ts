@@ -416,6 +416,7 @@ export class Channel {
   private async recoverLoop(conn: Connection, gen: number, epoch: string, pos: number, upTo: number): Promise<void> {
     let events = 0;
     let bytes = 0;
+    let broken = 0;
     for (;;) {
       const req: RecoverRequest = { channel: this.key, epoch, pos };
       if (upTo > 0) req.upTo = upTo;
@@ -439,6 +440,16 @@ export class Channel {
       if (!res.recovered) {
         this.reset(res.epoch ?? "", res.position, res.head, res.reason ?? "expired");
         return;
+      }
+      if (!completeBatch(msgs, res.count, pos)) {
+        // Events of the batch were lost on the way: retry from the same
+        // position rather than skipping them.
+        if (++broken > 3) {
+          this.recovering = false;
+          this.retryLater(conn, gen);
+          return;
+        }
+        continue;
       }
       for (const m of msgs) {
         const seq = parseSeq(header(m, Header.Sequence));
@@ -573,4 +584,18 @@ export class Channel {
       this.reset(resp.epoch ?? "", resp.last, head, "expired");
     }
   }
+}
+
+/**
+ * Reports whether a recovery batch arrived intact: as many events as the
+ * server sent, each continuing the previous one from pos.
+ */
+export function completeBatch(msgs: Msg[], count: number, pos: number): boolean {
+  if (msgs.length !== count) return false;
+  let prev = pos;
+  for (const m of msgs) {
+    if (parseSeq(header(m, Header.LastSequence)) !== prev) return false;
+    prev = parseSeq(header(m, Header.Sequence));
+  }
+  return true;
 }

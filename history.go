@@ -75,6 +75,10 @@ func checkStreamConfig(got, want jetstream.StreamConfig) error {
 		return errors.New("allow direct must be off")
 	case got.AllowRollup || got.AllowMsgTTL || !got.DenyDelete:
 		return errors.New("rollup, message TTL and deletes must be disabled")
+	case got.Sealed || got.NoAck:
+		return errors.New("stream must not be sealed or unacknowledged")
+	case got.MaxAge <= 0:
+		return errors.New("stream needs a max age")
 	}
 	return nil
 }
@@ -170,13 +174,18 @@ func (h *history) recoverBatch(ctx context.Context, c Channel, req RecoverReques
 	if req.Pos > next {
 		next = req.Pos
 	}
-	epoch2, first, _, err := h.state(ctx)
+	epoch2, first, last2, err := h.state(ctx)
 	if err != nil {
 		return RecoverResult{}, err
 	}
 	switch {
 	case epoch2 != epoch:
-		return RecoverResult{Recovered: false, Reason: ReasonEpoch, Epoch: epoch2, Position: last}, nil
+		// Positions of the old stream mean nothing in the new one.
+		head, err := h.head(ctx, c)
+		if err != nil {
+			return RecoverResult{}, err
+		}
+		return RecoverResult{Recovered: false, Reason: ReasonEpoch, Epoch: epoch2, Position: last2, Head: head}, nil
 	case first > req.Pos+1:
 		head, err := h.head(ctx, c)
 		if err != nil {

@@ -160,6 +160,7 @@ type Server struct {
 	log    *slog.Logger
 	reg    *registry
 	hist   *history
+	maxAge time.Duration // retention of the event stream as configured
 	relays *relays
 
 	authenticate AuthenticateFunc
@@ -297,6 +298,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.hist = &history{js: s.js, name: s.opts.Config.Stream, stream: stream, sub: s.sub}
+	s.maxAge = stream.CachedInfo().Config.MaxAge
 	s.reg = newRegistry(kv)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.work = make(chan *nats.Msg, 1024)
@@ -321,7 +323,9 @@ func (s *Server) Start(ctx context.Context) error {
 		case <-s.ctx.Done():
 		case s.work <- m:
 		default:
-			s.respondError(m, CodeOverloaded, "server busy")
+			if socket, ok := s.validRequest(m); ok && socket != "" {
+				s.respondError(m, CodeOverloaded, "server busy")
+			}
 		}
 	}
 	queue := s.opts.Config.Prefix

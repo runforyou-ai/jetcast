@@ -3,6 +3,8 @@ package jetcast
 import (
 	"context"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // SuspendRelays stops relaying to a socket without telling the client and
@@ -32,3 +34,10 @@ func (s *Server) SuspendRelays(socket string) (resume func()) {
 
 // DropRelays stops relaying to a socket without telling the client.
 func (s *Server) DropRelays(socket string) { s.SuspendRelays(socket) }
+
+// ValidRequest exposes request validation, which also guards the overload
+// reply path.
+func (s *Server) ValidRequest(subject, reply string) bool {
+	_, ok := s.validRequest(&nats.Msg{Subject: subject, Reply: reply})
+	return ok
+}

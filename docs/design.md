@@ -64,7 +64,7 @@ JetStream
 5. 读取吊销标记 `x.<user>` 与 `x.<user>.<session>`。标记的写入时间（JetStream 服务端时间）不早于 callout 请求的签发时间 `iat`（NATS 服务端时间，留 2 秒余量）时，说明认证进行期间发生了吊销：把登记标为已吊销并拒绝连接，客户端重试时会重新认证。
 6. 签发 JWT 并回复。
 
-与 `Disconnect` 的竞态由“先写后查”闭合：`Disconnect` 先写吊销标记、再按索引吊销登记；callout 先写登记与索引、再查吊销标记。两者交错时至少有一方能看到另一方的写入。
+与 `Disconnect` 的竞态由“先写后查”闭合：`Disconnect` 先写吊销标记、再按索引吊销登记；callout 先写登记与索引、再查吊销标记。两者交错时至少有一方能看到另一方的写入：要么 callout 拒绝连接，要么 `Disconnect` 吊销刚登记的连接。后一种情况下 JWT 已经签发，没有配置 `ConnectionAdmin` 时只能依靠控制消息与 JWT 过期；应用先使会话失效可以避免客户端再次认证成功。中继在建立后会再读一次登记，已吊销则立即移除。
 
 签发的 JWT：
 
@@ -175,7 +175,7 @@ SDK 用新的回复主题发送 `recover {channel, epoch, pos, upTo}`；服务�
 2. epoch 不同：回复 `{recovered: false, reason: "epoch"}`。
 3. 从 `pos + 1` 起按主题逐条读取（leader 路径），每条作为独立消息发到回复主题，带 `Jetcast-Event`、`Jetcast-Id`、`Jetcast-Origin`、`Nats-Sequence`、`Nats-Last-Sequence`（由服务端按读取顺序重建）；直到 `upTo`、本批条数（默认 100）或字节（默认 512 KB，至少一条）上限。
 4. 读完后读取 stream 状态：最早序号 `first > pos + 1` 说明 `pos` 之后已有事件被淘汰，结果不完整，回复 `{recovered: false, reason: "expired"}`；否则回复 `{recovered: true, more, next}`，`next` 是本批最后一条的序号（没有事件时为 `upTo - 1` 或当前最后序号）。
-5. 单次补发累计超过 10000 条或 16 MB 时回复 `{recovered: false, reason: "too_far"}`。
+5. 单次恢复累计超过 10000 条或 16 MB 时，由 SDK 放弃并报告 `{recovered: false, reason: "too_far"}`；服务端只限制每批的条数与字节，单连接的并发请求数另有上限。
 
 SDK 串行处理同一频道的补发与实时事件：补发期间实时事件进入缓冲（上限 1000 条，超出视为 `too_far`）；按批推进游标，`more` 时以 `next` 继续；完成后交付缓冲中序号大于游标的事件。补发失败（`recovered: false`）时，游标重置到服务端给出的当前位置，频道状态报告 `recovered: false` 与原因，由应用重新拉取数据。
 
@@ -188,7 +188,7 @@ SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有
 - `first > pos + 1`：`pos` 之后有事件已被淘汰，无法证明完整，按 `recovered: false, reason: "expired"` 处理；
 - epoch 变化：按 `reason: "epoch"` 处理。
 
-服务端对同一频道的最新序号查询做 1 秒合并。
+服务端每次 heads 请求先读 stream 的最新序号、再读各频道最新序号、最后读最早序号，保证客户端据此推进游标不会越过未收到的事件；同一频道的查询合并留待后续优化。SDK 每批最多 100 个频道。
 
 ### 7.5 Ephemeral 频道
 

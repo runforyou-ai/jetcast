@@ -1,4 +1,5 @@
-import { headers } from "@nats-io/nats-core";
+import { headers, type Msg } from "@nats-io/nats-core";
+import { completeBatch } from "../src/subscription.js";
 import { describe, expect, it } from "vitest";
 import { channelNameError, decodePayload, header, isSocketId, matchPattern, newSocketId, parseSeq, parseTime } from "../src/util.js";
 
@@ -88,4 +89,19 @@ describe("decodePayload", () => {
     expect(decodePayload(enc.encode("not json"))).toBe("not json");
     expect(decodePayload(new Uint8Array())).toBe("");
   });
+});
+
+describe("completeBatch", () => {
+  const ev = (seq: number, prev: number): Msg => {
+    const h = headers();
+    h.set("Nats-Sequence", String(seq));
+    h.set("Nats-Last-Sequence", String(prev));
+    return { headers: h } as unknown as Msg;
+  };
+  const full = [ev(12, 10), ev(15, 12), ev(20, 15)];
+  it("accepts an intact batch", () => expect(completeBatch(full, 3, 10)).toBe(true));
+  it("rejects a missing tail", () => expect(completeBatch(full.slice(0, 2), 3, 10)).toBe(false));
+  it("rejects a hole", () => expect(completeBatch([full[0], full[2]], 2, 10)).toBe(false));
+  it("rejects a wrong start", () => expect(completeBatch(full, 3, 9)).toBe(false));
+  it("accepts an empty batch", () => expect(completeBatch([], 0, 10)).toBe(true));
 });

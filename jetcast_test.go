@@ -837,3 +837,74 @@ func TestClientLeaveStopsRelayImmediately(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestRequestValidation(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	srv := h.node()
+	sock := "AAAAAAAAAAAAAAAAAAAAAG"
+	cases := []struct {
+		subject, reply string
+		ok             bool
+	}{
+		{"jetcast.rq." + sock + ".hello", "jetcast.c." + sock + ".r.x", true},
+		{"jetcast.rq." + sock + ".hello", "jetcast.in.pub.news", false},
+		{"jetcast.rq." + sock + ".hello", "jetcast.c.AAAAAAAAAAAAAAAAAAAAAH.r.x", false},
+		{"jetcast.rq." + sock + ".hello", "", false},
+		{"jetcast.rq.short.hello", "jetcast.c.short.r.x", false},
+	}
+	for _, c := range cases {
+		if got := srv.ValidRequest(c.subject, c.reply); got != c.ok {
+			t.Errorf("%s reply %q: %v", c.subject, c.reply, got)
+		}
+	}
+}
+
+func TestRevocationDuringRelayAuthorization(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	srv := h.node(func(o *jetcast.ServerOptions) { o.Admin = nil })
+	entered, release := make(chan struct{}), make(chan struct{})
+	if err := srv.Channel("slow.{id}", func(ctx context.Context, u jetcast.User, p jetcast.Params) (bool, error) {
+		close(entered)
+		<-release
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := h.client("alice:s1")
+	s := a.Private("slow.1")
+	c := collect(s)
+	<-entered
+	h.mu.Lock()
+	h.invalid["alice:s1"] = true
+	h.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+	if _, err := srv.Disconnect(ctx, jetcast.BySession("alice", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	time.Sleep(300 * time.Millisecond)
+	if n := srv.Stats().Relays; n != 0 {
+		t.Fatalf("%d relays after revocation", n)
+	}
+	h.broadcast(srv, "e", "secret", jetcast.Private("slow.1"))
+	c.none(t, 300*time.Millisecond)
+}
+
+func TestCloseFromCallback(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	srv := h.node()
+	a := h.client("alice:s1")
+	done := make(chan struct{})
+	s := a.Channel("news").Listen("bye", func(client.Event) {
+		_ = a.Close()
+		close(done)
+	})
+	ready(t, s)
+	h.broadcast(srv, "bye", "", jetcast.Public("news"))
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatal("Close from a callback did not return")
+	}
+}

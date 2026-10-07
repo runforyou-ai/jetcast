@@ -65,15 +65,23 @@ func (s *Server) parseRequest(subject string) (socket, op string, node bool, ok 
 	return "", "", false, false
 }
 
+// validRequest returns the requesting socket when the subject is a request
+// and its reply subject lies in the socket's own namespace. Requests failing
+// it are dropped without any reply, so that clients cannot make the server
+// publish elsewhere.
+func (s *Server) validRequest(m *nats.Msg) (string, bool) {
+	socket, _, _, ok := s.parseRequest(m.Subject)
+	if !ok || ValidateSocketID(socket) != nil || !strings.HasPrefix(m.Reply, s.sub.connReplies(socket)+".") {
+		return "", false
+	}
+	return socket, true
+}
+
 func (s *Server) handleRequest(m *nats.Msg) {
-	socket, op, node, ok := s.parseRequest(m.Subject)
-	if !ok || ValidateSocketID(socket) != nil {
+	if _, ok := s.validRequest(m); !ok {
 		return
 	}
-	// Reply only into the requesting connection's own namespace.
-	if !strings.HasPrefix(m.Reply, s.sub.connReplies(socket)+".") {
-		return
-	}
+	socket, op, node, _ := s.parseRequest(m.Subject)
 	s.inflightMu.Lock()
 	if s.inflight[socket] >= s.opts.Limits.ConcurrentRequests {
 		s.inflightMu.Unlock()
@@ -137,7 +145,7 @@ func (s *Server) handleHello(ctx context.Context, m *nats.Msg, rec *connRecord) 
 	}
 	s.respond(m, HelloResponse{
 		User: rec.User, Info: rec.Info, Grants: rec.Grants, ExpiresAt: rec.ExpiresAt,
-		Epoch: epoch, MaxAgeMs: s.opts.History.MaxAge.Milliseconds(), RenewMs: s.opts.RenewInterval.Milliseconds(),
+		Epoch: epoch, MaxAgeMs: s.maxAge.Milliseconds(), RenewMs: s.opts.RenewInterval.Milliseconds(),
 		Node: s.node, Prefix: s.sub.p,
 	})
 }
@@ -187,6 +195,19 @@ func (s *Server) handleSub(ctx context.Context, m *nats.Msg, socket string, rec 
 			return
 		}
 		resp.Path = PathRelay
+		// A Disconnect may have revoked the connection while the authorizer
+		// ran; it marks the record before removing relays, so reading the
+		// record after adding the relay closes the race.
+		fresh, err := s.reg.get(ctx, socket, false)
+		if err != nil || !fresh.valid(time.Now()) {
+			s.relays.remove(socket, req.Sid)
+			if err != nil {
+				s.respondError(m, CodeUnavailable, "registry unavailable")
+			} else {
+				s.respondError(m, CodeDenied, "connection not registered")
+			}
+			return
+		}
 	}
 	if resp.Recoverable {
 		epoch, _, last, err := s.hist.state(ctx)
@@ -194,6 +215,9 @@ func (s *Server) handleSub(ctx context.Context, m *nats.Msg, socket string, rec 
 			resp.Head, err = s.hist.head(ctx, c)
 		}
 		if err != nil {
+			if resp.Path == PathRelay {
+				s.relays.remove(socket, req.Sid)
+			}
 			s.respondError(m, CodeUnavailable, "stream unavailable")
 			return
 		}
@@ -226,10 +250,11 @@ func (s *Server) handleHeads(ctx context.Context, m *nats.Msg, socket string, re
 			var ok bool
 			if node {
 				ok = s.relays.has(socket, c)
-			} else {
-				ok, err = s.canRead(ctx, rec, socket, c)
+			} else if ok, err = s.canRead(ctx, rec, socket, c); err != nil {
+				s.respondError(m, CodeUnavailable, "authorization failed")
+				return
 			}
-			if err != nil || !ok {
+			if !ok {
 				resp.Denied = append(resp.Denied, name)
 				continue
 			}
@@ -260,8 +285,8 @@ func (s *Server) handleRecover(ctx context.Context, m *nats.Msg, socket string, 
 		return
 	}
 	c, err := ParseChannel(req.Channel)
-	if err != nil || s.opts.Config.ephemeral(c.Name) {
-		s.respondError(m, CodeInvalid, "invalid channel")
+	if err != nil || s.opts.Config.ephemeral(c.Name) || req.Pos == ^uint64(0) {
+		s.respondError(m, CodeInvalid, "invalid channel or position")
 		return
 	}
 	ok, err := s.canRead(ctx, rec, socket, c)

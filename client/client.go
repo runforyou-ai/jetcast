@@ -155,7 +155,9 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		ready:   make(chan struct{}),
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
-	c.wg.Go(c.runCalls)
+	// The callback runner is not waited for by Close, so callbacks may close
+	// the client.
+	go c.runCalls()
 	c.wg.Go(c.runTimers)
 	c.startConnecting(false)
 	select {
@@ -198,6 +200,16 @@ func (c *Client) OnStatus(f func(Status)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.statusFn = append(c.statusFn, f)
+}
+
+// Info returns the user's public information sent by the server, as JSON.
+func (c *Client) Info() json.RawMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.hello.Info
 }
 
 // Close closes the client.
@@ -595,7 +607,18 @@ func (c *Client) heads(conn *connection, idleSince time.Time) {
 			groups[node] = append(groups[node], s)
 		}
 	}
+	const chunk = 100 // below the server's default HeadsChannels limit
+	var batches [][]*Subscription
+	var nodes []string
 	for node, subs := range groups {
+		for len(subs) > chunk {
+			batches, nodes = append(batches, subs[:chunk]), append(nodes, node)
+			subs = subs[chunk:]
+		}
+		batches, nodes = append(batches, subs), append(nodes, node)
+	}
+	for i, subs := range batches {
+		node := nodes[i]
 		epoch := subs[0].cursorEpoch()
 		names := make([]string, 0, len(subs))
 		for _, s := range subs {

@@ -95,6 +95,21 @@ func (s *Subscription) Listen(event string, h func(Event)) *Subscription {
 	return s
 }
 
+// StopListening removes the handlers of one event name.
+func (s *Subscription) StopListening(event string) *Subscription {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.listeners, event)
+	return s
+}
+
+// State returns the current state.
+func (s *Subscription) State() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
 // ListenAll registers a handler for every event.
 func (s *Subscription) ListenAll(h func(Event)) *Subscription {
 	s.mu.Lock()
@@ -201,6 +216,18 @@ func granted(conn *connection, name string) bool {
 // resubscribe starts a new subscription attempt on conn. A non-empty sid
 // restricts it to the attempt with that sid, ignoring stale signals.
 func (s *Subscription) resubscribe(conn *connection, sid string) {
+	// Attempts always bind to the current connection: a caller may hold a
+	// connection that was replaced meanwhile.
+	cur := s.c.current()
+	if cur == nil {
+		return
+	}
+	if cur != conn {
+		if sid != "" {
+			return
+		}
+		conn = cur
+	}
 	s.mu.Lock()
 	if s.state == StateDenied || s.state == StateLeft || sid != "" && sid != s.sid {
 		s.mu.Unlock()
@@ -297,7 +324,7 @@ func (s *Subscription) attempt(conn *connection, gen int) {
 	}
 	if resp.Error != nil {
 		s.teardownLocked()
-		s.setStateLocked(State{State: StateDenied, Err: errors.New("jetcast: channel denied")})
+		s.setStateLocked(State{State: StateDenied, Reason: jetcast.CodeDenied, Err: errors.New("jetcast: channel denied")})
 		s.mu.Unlock()
 		s.c.forget(s)
 		return
@@ -432,7 +459,7 @@ func (s *Subscription) startRecoveryLocked(conn *connection, upTo uint64) {
 }
 
 func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos, upTo uint64) {
-	events, bytes := 0, 0
+	events, bytes, broken := 0, 0, 0
 	for {
 		res, msgs, err := s.recoverBatch(conn, jetcast.RecoverRequest{
 			Channel: s.ch.String(), Epoch: epoch, Pos: pos, UpTo: upTo,
@@ -458,6 +485,19 @@ func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos,
 			s.resetLocked(res.Epoch, res.Position, res.Head, res.Reason)
 			s.mu.Unlock()
 			return
+		}
+		if !completeBatch(msgs, res, pos) {
+			// Events of the batch were lost on the way: retry from the same
+			// position rather than skipping them.
+			s.mu.Unlock()
+			if broken++; broken > 3 {
+				s.mu.Lock()
+				s.recovering = false
+				s.mu.Unlock()
+				s.retryLater(conn, gen)
+				return
+			}
+			continue
 		}
 		for _, m := range msgs {
 			seq := parseUint(m.Header.Get(jetcast.HeaderSequence))
@@ -491,6 +531,22 @@ func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos,
 	}
 }
 
+// completeBatch reports whether a recovery batch arrived intact: as many
+// events as the server sent, each continuing the previous one from pos.
+func completeBatch(msgs []*nats.Msg, res jetcast.RecoverResult, pos uint64) bool {
+	if len(msgs) != res.Count {
+		return false
+	}
+	prev := pos
+	for _, m := range msgs {
+		if parseUint(m.Header.Get(jetcast.HeaderLastSequence)) != prev {
+			return false
+		}
+		prev = parseUint(m.Header.Get(jetcast.HeaderSequence))
+	}
+	return true
+}
+
 // resetLocked restarts the cursor at the stream's current position after a
 // failed recovery and reports recovered=false.
 func (s *Subscription) resetLocked(epoch string, position, head uint64, reason string) {
@@ -508,7 +564,7 @@ func (s *Subscription) resetLocked(epoch string, position, head uint64, reason s
 func (s *Subscription) recoverBatch(conn *connection, req jetcast.RecoverRequest) (jetcast.RecoverResult, []*nats.Msg, error) {
 	var res jetcast.RecoverResult
 	inbox := conn.nc.NewRespInbox()
-	ch := make(chan *nats.Msg, 256)
+	ch := make(chan *nats.Msg, 4096)
 	sub, err := conn.nc.ChanSubscribe(inbox, ch)
 	if err != nil {
 		return res, nil, err

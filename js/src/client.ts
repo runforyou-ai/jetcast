@@ -281,7 +281,7 @@ export class Echo {
 
   /** Opens and greets a new connection. */
   private async dial(): Promise<Connection> {
-    const token = await this.getToken();
+    const token = await withTimeout(Promise.resolve(this.getToken()), 15_000, "jetcast: getToken timed out");
     if (this.closed) throw new Error("jetcast: client closed");
     const socket = newSocketId();
     const nc = await wsconnect({
@@ -453,8 +453,14 @@ export class Echo {
       list.push(s);
       groups.set(node, list);
     }
+    // Batches stay below the server's default limit of channels per request.
+    const chunk = 100;
+    const batches: [string, Channel[]][] = [];
+    for (const [node, subs] of groups) {
+      for (let i = 0; i < subs.length; i += chunk) batches.push([node, subs.slice(i, i + chunk)]);
+    }
     await Promise.all(
-      [...groups].map(async ([node, subs]) => {
+      batches.map(async ([node, subs]) => {
         const epoch = subs[0].cursorEpoch;
         const subject = node === "" ? conn.requestSubject("heads") : conn.nodeRequestSubject(node, "heads");
         let resp: HeadsResponse;
@@ -474,4 +480,13 @@ export class Echo {
       }),
     );
   }
+}
+
+/** Rejects when promise does not settle within ms. */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

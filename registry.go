@@ -155,7 +155,7 @@ func (r *registry) revoke(ctx context.Context, socket string) (*connRecord, erro
 		if _, err := r.kv.Update(ctx, "s."+socket, b, entry.Revision()); err == nil {
 			r.invalidate(socket)
 			return &rec, nil
-		} else if !errors.Is(err, jetstream.ErrKeyExists) {
+		} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
 			return nil, err
 		}
 	}
@@ -207,7 +207,13 @@ func (r *registry) sockets(ctx context.Context, user, session string) ([]string,
 		socket := strings.TrimPrefix(key, prefix)
 		if session != "" {
 			entry, err := r.kv.Get(ctx, key)
-			if err != nil || string(entry.Value()) != session {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if string(entry.Value()) != session {
 				continue
 			}
 		}
