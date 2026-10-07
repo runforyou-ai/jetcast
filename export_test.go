@@ -28,6 +28,7 @@ func (s *Server) SuspendRelays(socket string) (resume func()) {
 			if _, err := r.add(ctx, e.socket, e.rec, e.channel, e.sid); err != nil {
 				panic(err)
 			}
+			r.activate(e.socket, e.sid)
 		}
 	}
 }

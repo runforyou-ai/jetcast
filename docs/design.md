@@ -155,7 +155,7 @@ jetcast 的序号只保证传输层连续，不是业务数据的版本；业务
 - 默认名称 `JETCAST`，主题 `<p>.in.>`，RePublish `<p>.in.>` → `<p>.ev.>`。
 - 只用按年龄与总字节淘汰：默认 `MaxAge` 5 分钟、`MaxBytes` 1 GB、`DiscardOld`；不设每主题条数上限，不允许 rollup、单条删除、按消息 TTL；不开启 AllowDirect；`Duplicates` 2 分钟；文件存储，副本数可配置。
 - epoch 为 stream 创建时间。
-- `Server.Start` 默认只校验 stream 与 KV 配置，不一致时报错；`ManageStreams: true` 时创建或更新。
+- `Server.Start` 默认只校验 stream 与 KV 配置中影响补发正确性的字段（主题、RePublish、淘汰策略、条数上限、AllowDirect、删除与 rollup、Sealed、NoAck、MaxAge），不一致时报错；留存时长等取 stream 的实际配置。`ManageStreams: true` 时创建或更新。
 
 ### 7.2 游标与实时检测
 

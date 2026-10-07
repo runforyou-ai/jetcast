@@ -202,8 +202,13 @@ func (r *registry) sockets(ctx context.Context, user, session string) ([]string,
 		}
 		return nil, err
 	}
-	var out []string
+	// Drain the lister before any read that may fail, so it never blocks.
+	var keys []string
 	for key := range lister.Keys() {
+		keys = append(keys, key)
+	}
+	var out []string
+	for _, key := range keys {
 		socket := strings.TrimPrefix(key, prefix)
 		if session != "" {
 			entry, err := r.kv.Get(ctx, key)

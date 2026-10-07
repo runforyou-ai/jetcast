@@ -216,29 +216,27 @@ func granted(conn *connection, name string) bool {
 // resubscribe starts a new subscription attempt on conn. A non-empty sid
 // restricts it to the attempt with that sid, ignoring stale signals.
 func (s *Subscription) resubscribe(conn *connection, sid string) {
+	s.mu.Lock()
 	// Attempts always bind to the current connection: a caller may hold a
-	// connection that was replaced meanwhile.
+	// connection that was replaced meanwhile. Reading it under s.mu orders
+	// this with adopt, which resubscribes after switching connections.
 	cur := s.c.current()
 	if cur == nil {
+		s.mu.Unlock()
 		return
 	}
 	if cur != conn {
 		if sid != "" {
+			s.mu.Unlock()
 			return
 		}
 		conn = cur
 	}
-	s.mu.Lock()
 	if s.state == StateDenied || s.state == StateLeft || sid != "" && sid != s.sid {
 		s.mu.Unlock()
 		return
 	}
-	oldConn, oldPath := s.conn, s.path
-	if oldConn == conn && oldPath == jetcast.PathRelay {
-		s.mu.Unlock()
-		s.sendLeave(conn)
-		s.mu.Lock()
-	}
+	oldConn, oldPath, oldNode, oldSid := s.conn, s.path, s.node, s.sid
 	s.gen++
 	gen := s.gen
 	s.teardownLocked()
@@ -247,6 +245,9 @@ func (s *Subscription) resubscribe(conn *connection, sid string) {
 		s.setStateLocked(State{State: StateInterrupted})
 	}
 	s.mu.Unlock()
+	if oldConn == conn && oldPath == jetcast.PathRelay {
+		sendLeave(conn, s.c.sub.nodeRequest(conn.socket, oldNode, "leave"), oldSid)
+	}
 	go s.attempt(conn, gen)
 }
 

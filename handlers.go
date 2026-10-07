@@ -208,6 +208,7 @@ func (s *Server) handleSub(ctx context.Context, m *nats.Msg, socket string, rec 
 			}
 			return
 		}
+		s.relays.activate(socket, req.Sid)
 	}
 	if resp.Recoverable {
 		epoch, _, last, err := s.hist.state(ctx)

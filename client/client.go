@@ -93,9 +93,13 @@ type Client struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	calls  chan func() // callbacks to the application, in order
-	wg     sync.WaitGroup
-	ready  chan struct{}
+	// callbacks to the application, run in order by runCalls. The queue is
+	// unbounded so that queueing never blocks, even from a callback.
+	callsMu sync.Mutex
+	calls   []func()
+	wake    chan struct{}
+	wg      sync.WaitGroup
+	ready   chan struct{}
 }
 
 // connection is one NATS connection with its own socket.
@@ -151,7 +155,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		status:  StatusConnecting,
 		subs:    map[string]*Subscription{},
 		sockets: map[string]bool{},
-		calls:   make(chan func(), 4096),
+		wake:    make(chan struct{}, 1),
 		ready:   make(chan struct{}),
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
@@ -251,19 +255,36 @@ func (c *Client) setStatusLocked(s Status) {
 
 // call queues an application callback; callbacks run one at a time in order.
 func (c *Client) call(f func()) {
+	c.callsMu.Lock()
+	c.calls = append(c.calls, f)
+	c.callsMu.Unlock()
 	select {
-	case c.calls <- f:
-	case <-c.ctx.Done():
+	case c.wake <- struct{}{}:
+	default:
 	}
 }
 
 func (c *Client) runCalls() {
 	for {
+		c.callsMu.Lock()
+		batch := c.calls
+		c.calls = nil
+		c.callsMu.Unlock()
+		for _, f := range batch {
+			f()
+		}
 		select {
 		case <-c.ctx.Done():
+			// Run what was queued before closing, such as the stopped status.
+			c.callsMu.Lock()
+			rest := c.calls
+			c.calls = nil
+			c.callsMu.Unlock()
+			for _, f := range rest {
+				f()
+			}
 			return
-		case f := <-c.calls:
-			f()
+		case <-c.wake:
 		}
 	}
 }

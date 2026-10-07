@@ -17,6 +17,9 @@ type relayEntry struct {
 	rec        *connRecord
 	renewed    time.Time
 	authorized time.Time
+	// active is false until the subscription is confirmed; inactive entries
+	// receive nothing.
+	active bool
 }
 
 // relayChannel is the node's subscription to a channel's events and the
@@ -55,9 +58,9 @@ var (
 	errSidReused     = errors.New("sid already used for another channel")
 )
 
-// add starts relaying a channel to a connection. Adding an existing sid for
-// the same channel is a no-op. It returns once the node's subscription is
-// registered with the NATS server.
+// add registers an inactive relay of a channel to a connection; activate
+// starts forwarding. Adding an existing sid for the same channel is a no-op.
+// It returns once the node's subscription is registered with the NATS server.
 func (r *relays) add(ctx context.Context, socket string, rec *connRecord, c Channel, sid string) (string, error) {
 	now := time.Now()
 	r.mu.Lock()
@@ -113,7 +116,9 @@ func (r *relays) deliver(key string, m *nats.Msg) {
 	}
 	targets := make([]*relayEntry, 0, len(rc.entries))
 	for e := range rc.entries {
-		targets = append(targets, e)
+		if e.active {
+			targets = append(targets, e)
+		}
 	}
 	r.mu.Unlock()
 	for _, e := range targets {
@@ -132,12 +137,21 @@ func (r *relays) deliver(key string, m *nats.Msg) {
 	}
 }
 
+// activate starts forwarding a registered relay.
+func (r *relays) activate(socket, sid string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.bySid[sidKey(socket, sid)]; e != nil {
+		e.active = true
+	}
+}
+
 // has reports whether the node relays the channel to the connection.
 func (r *relays) has(socket string, c Channel) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for e := range r.bySocket[socket] {
-		if e.channel == c {
+		if e.channel == c && e.active {
 			return true
 		}
 	}
