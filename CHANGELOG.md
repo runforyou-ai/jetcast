@@ -14,6 +14,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   connection-admin failure; `Revoked` counts only records changed by that call.
 - System-account enforcement treats NATS's explicit “no such client or leafnode
   id” response as an already-closed connection, so repeated kicks succeed.
+- `Server.Close` releases partial state when `Start` fails before creating its
+  cancellation context.
 - Document the application's responsibility for retrying failed revocations.
 
 ## [0.1.0] - 2026-10-08

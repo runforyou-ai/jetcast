@@ -350,7 +350,8 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close stops serving. Relayed clients are told to resubscribe elsewhere.
+// Close stops serving and releases resources after a successful or failed Start.
+// Relayed clients are told to resubscribe elsewhere.
 func (s *Server) Close() error {
 	if !s.started.Load() || !s.closed.CompareAndSwap(false, true) {
 		return nil
@@ -359,7 +360,9 @@ func (s *Server) Close() error {
 		_ = sub.Unsubscribe()
 	}
 	s.relays.closeAll()
-	s.cancel()
+	if s.cancel != nil {
+		s.cancel()
+	}
 	s.wg.Wait()
 	return s.nc.Flush()
 }
