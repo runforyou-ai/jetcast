@@ -173,7 +173,7 @@ func (s *Server) authorizeConnection(ctx context.Context, rc *jwt.AuthorizationR
 		err = errors.New("revoked during authentication")
 	}
 	if err != nil {
-		if _, rerr := s.reg.revoke(ctx, socket); rerr != nil {
+		if _, _, rerr := s.reg.revoke(ctx, socket); rerr != nil {
 			s.log.Warn("jetcast: revoke rejected socket", "error", rerr)
 		}
 		return "", err

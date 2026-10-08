@@ -577,8 +577,10 @@ type DisconnectResult struct {
 // Disconnect revokes the target's connections: it marks the target revoked so
 // that authentications in progress fail, marks every connection record
 // revoked so their requests are denied, stops their relays, asks clients to
-// close and kicks them through the ConnectionAdmin. Invalidate the session in
-// the application first, or clients reconnect with the same credentials.
+// close and kicks them through the ConnectionAdmin. Repeated calls retry
+// enforcement for existing revoked records. Callers must retry errors to
+// complete enforcement. Invalidate the session in the application first, or
+// clients reconnect with the same credentials.
 func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, error) {
 	res := DisconnectResult{Enforced: s.opts.Admin != nil}
 	if err := ValidateID(t.User); err != nil {
@@ -596,7 +598,7 @@ func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, er
 	var revoked []*connRecord
 	var revokedSockets []string
 	for _, socket := range sockets {
-		rec, err := s.reg.revoke(ctx, socket)
+		rec, changed, err := s.reg.revoke(ctx, socket)
 		if err != nil {
 			res.Failed++
 			errs = append(errs, err)
@@ -605,7 +607,9 @@ func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, er
 		if rec == nil {
 			continue
 		}
-		res.Revoked++
+		if changed {
+			res.Revoked++
+		}
 		revoked = append(revoked, rec)
 		revokedSockets = append(revokedSockets, socket)
 		s.control(socket, Control{Type: CtlDisconnect})

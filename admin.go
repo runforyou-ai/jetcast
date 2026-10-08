@@ -42,7 +42,7 @@ func (a systemAdmin) Kick(ctx context.Context, serverID string, cid uint64) erro
 	}
 	if err := json.Unmarshal(resp.Data, &out); err == nil && out.Error != nil {
 		// The connection may already be gone.
-		if out.Error.Code == 404 {
+		if out.Error.Code == 404 || (out.Error.Code == 500 && out.Error.Description == "no such client or leafnode id") {
 			return nil
 		}
 		return fmt.Errorf("jetcast: kick %s/%d: %s", serverID, cid, out.Error.Description)
