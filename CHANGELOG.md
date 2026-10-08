@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-08
+
 ### Added
 
 - Server: auth callout with a JetStream connection registry, connect-time
@@ -16,3 +18,6 @@ project adheres to [Semantic Versioning](https://semver.org/).
   recovery that reports when it cannot be complete.
 - Go client and TypeScript SDK (`@runforyou/jetcast`).
 - Development server `cmd/jetcast-dev` and an embedded example.
+
+[Unreleased]: https://github.com/runforyou-ai/jetcast/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/runforyou-ai/jetcast/releases/tag/v0.1.0
