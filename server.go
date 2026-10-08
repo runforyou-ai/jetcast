@@ -350,7 +350,8 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close stops serving. Relayed clients are told to resubscribe elsewhere.
+// Close stops serving and releases resources after a successful or failed Start.
+// Relayed clients are told to resubscribe elsewhere.
 func (s *Server) Close() error {
 	if !s.started.Load() || !s.closed.CompareAndSwap(false, true) {
 		return nil
@@ -359,7 +360,9 @@ func (s *Server) Close() error {
 		_ = sub.Unsubscribe()
 	}
 	s.relays.closeAll()
-	s.cancel()
+	if s.cancel != nil {
+		s.cancel()
+	}
 	s.wg.Wait()
 	return s.nc.Flush()
 }
@@ -577,8 +580,10 @@ type DisconnectResult struct {
 // Disconnect revokes the target's connections: it marks the target revoked so
 // that authentications in progress fail, marks every connection record
 // revoked so their requests are denied, stops their relays, asks clients to
-// close and kicks them through the ConnectionAdmin. Invalidate the session in
-// the application first, or clients reconnect with the same credentials.
+// close and kicks them through the ConnectionAdmin. Repeated calls retry
+// enforcement for existing revoked records. Callers must retry errors to
+// complete enforcement. Invalidate the session in the application first, or
+// clients reconnect with the same credentials.
 func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, error) {
 	res := DisconnectResult{Enforced: s.opts.Admin != nil}
 	if err := ValidateID(t.User); err != nil {
@@ -596,7 +601,7 @@ func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, er
 	var revoked []*connRecord
 	var revokedSockets []string
 	for _, socket := range sockets {
-		rec, err := s.reg.revoke(ctx, socket)
+		rec, changed, err := s.reg.revoke(ctx, socket)
 		if err != nil {
 			res.Failed++
 			errs = append(errs, err)
@@ -605,7 +610,9 @@ func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, er
 		if rec == nil {
 			continue
 		}
-		res.Revoked++
+		if changed {
+			res.Revoked++
+		}
 		revoked = append(revoked, rec)
 		revokedSockets = append(revokedSockets, socket)
 		s.control(socket, Control{Type: CtlDisconnect})

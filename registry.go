@@ -132,34 +132,34 @@ func (r *registry) invalidate(sockets ...string) {
 	}
 }
 
-// revoke marks a socket's record revoked. It returns the record, or nil when
-// there is none or it was already revoked.
-func (r *registry) revoke(ctx context.Context, socket string) (*connRecord, error) {
+// revoke marks a socket's record revoked and returns whether it changed.
+// Existing revoked records are returned so enforcement can be retried.
+func (r *registry) revoke(ctx context.Context, socket string) (*connRecord, bool, error) {
 	for range 5 {
 		entry, err := r.kv.Get(ctx, "s."+socket)
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, nil
+			return nil, false, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		var rec connRecord
 		if err := json.Unmarshal(entry.Value(), &rec); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if rec.Revoked {
-			return nil, nil
+			return &rec, false, nil
 		}
 		rec.Revoked = true
 		b, _ := json.Marshal(&rec)
 		if _, err := r.kv.Update(ctx, "s."+socket, b, entry.Revision()); err == nil {
 			r.invalidate(socket)
-			return &rec, nil
+			return &rec, true, nil
 		} else if !errors.Is(err, jetstream.ErrKeyExists) && !errors.Is(err, jetstream.ErrKeyRevisionMismatch) {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return nil, errors.New("jetcast: revoke: too many concurrent updates")
+	return nil, false, errors.New("jetcast: revoke: too many concurrent updates")
 }
 
 // markRevoked writes the revocation mark of a user, or of one session when

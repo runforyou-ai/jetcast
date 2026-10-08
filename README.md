@@ -147,7 +147,10 @@ Details: [design](docs/design.md) (Chinese) and [deployment](docs/deployment.md)
   reload when a subscription reports `recovered: false`.
 - Authorization is checked when a connection is made (grants) and when a channel is
   subscribed (authorizers), then periodically for relayed channels. Use `Disconnect` to
-  cut access immediately.
+  cut access immediately. Configure a `ConnectionAdmin` for forced disconnection.
+  If `Disconnect` returns an error, the application must retry it to complete
+  enforcement; retries include already-revoked connections. Persist the retry
+  intent when enforcement must survive an application restart.
 - `toOthers` suppresses the sender's listeners; it is not a confidentiality mechanism.
 
 ## Roadmap

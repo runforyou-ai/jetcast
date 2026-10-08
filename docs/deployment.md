@@ -129,6 +129,16 @@ browsers never try internal addresses.
 - `jetcast.SystemAdmin` kicks connections on any server of the cluster; `embedded.Admin`
   only reaches its own server.
 
+## Revocation failures
+
+Configure `ConnectionAdmin` for forced disconnection. A failed `Disconnect`
+can leave directly subscribed clients connected with their existing NATS grants.
+The application must retry failed calls until enforcement completes; repeated
+calls include already-revoked connection records. Persist the retry intent when
+it must survive an application restart. The registry retains records beyond the
+maximum connection lifetime, so retries can address live connections throughout
+that lifetime.
+
 ## Availability
 
 | Failure | Effect |
