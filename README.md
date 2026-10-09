@@ -146,8 +146,9 @@ Details: [design](docs/design.md) (Chinese) and [deployment](docs/deployment.md)
   window (5 minutes by default). Use your own data, not jetcast, as the source of truth:
   reload when a subscription reports `recovered: false`.
 - Authorization is checked when a connection is made (grants) and when a channel is
-  subscribed (authorizers), then periodically for relayed channels. Use `Disconnect` to
-  cut access immediately. Configure a `ConnectionAdmin` for forced disconnection.
+  subscribed (authorizers), then periodically for relayed channels. A relay that
+  cannot be authorized again within twice `ReauthorizeInterval`, because the authorizer
+  keeps failing or the node is too busy, is dropped and the client subscribes again. Use `Disconnect` to cut access immediately. Configure a `ConnectionAdmin` for forced disconnection.
   If `Disconnect` returns an error, the application must retry it to complete
   enforcement; retries include already-revoked connections. Persist the retry
   intent when enforcement must survive an application restart.

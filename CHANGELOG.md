@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Heads requests no longer run channel authorizers: only public, granted and
+  relayed channels get heads; others are reported denied.
+- Auth callouts are handled by a bounded pool of workers
+  (`Limits.ConcurrentCallouts`, 32 by default) that `Close` waits for. The
+  four-second budget of a callout starts when it arrives; requests that no
+  longer fit in it or in the queue are dropped and counted in
+  `Stats.CalloutDropped`.
+- Relay reauthorization runs at most 50 due relays per renewal, least recently
+  attempted first, four at a time per renewal and 16 per node. A relay that is
+  not authorized again within twice `ReauthorizeInterval`, because the
+  authorizer failed or was not reached, is removed with an `interrupted`
+  control and the client subscribes again.
+- `leave` requests skip the registry read and the concurrent request limit.
+- `Authenticate` and `Grants` panic and `Channel` returns an error when called
+  after `Start`.
+- An unmanaged registry bucket needs a TTL of at least `MaxConnectionTTL` plus
+  one minute.
+- `Disconnect` revokes existing connections even when writing the revocation
+  mark fails, and still returns the error.
+
+### Fixed
+
+- Panics in `Authenticate`, `Grants` and channel authorizers reject the
+  connection or fail the request instead of crashing the process.
+- A failed flush when re-adding an existing relay reports `unavailable`.
+
 ## [0.1.1] - 2026-10-08
 
 ### Fixed

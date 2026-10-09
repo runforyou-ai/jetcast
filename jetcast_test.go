@@ -30,6 +30,20 @@ type harness struct {
 	invalid map[string]bool     // revoked tokens
 	nodes   []*jetcast.Server
 	cfg     jetcast.Config
+	// routes are extra channel authorizers registered on every node.
+	routes []route
+	// onAuth runs at the start of every authentication.
+	onAuth func(context.Context, jetcast.AuthRequest)
+}
+
+type route struct {
+	pattern string
+	f       jetcast.AuthorizeFunc
+}
+
+// channel registers an extra channel authorizer on nodes started later.
+func (h *harness) channel(pattern string, f jetcast.AuthorizeFunc) {
+	h.routes = append(h.routes, route{pattern, f})
 }
 
 func newHarness(t *testing.T, cfg jetcast.Config) *harness {
@@ -69,6 +83,9 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 	// Tokens are "<user>:<session>"; ".std" suffix allows standard
 	// connections.
 	srv.Authenticate(func(ctx context.Context, r jetcast.AuthRequest) (jetcast.User, error) {
+		if h.onAuth != nil {
+			h.onAuth(ctx, r)
+		}
 		h.mu.Lock()
 		bad := h.invalid[r.Token]
 		h.mu.Unlock()
@@ -81,6 +98,9 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 		return u, nil
 	})
 	srv.Grants(func(ctx context.Context, u jetcast.User) ([]string, error) {
+		if u.ID == "gpanic" {
+			panic("grants failure")
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		return h.grants[u.ID], nil
@@ -91,6 +111,11 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 		return h.allowed[u.ID+"|orders."+p["id"]], nil
 	}); err != nil {
 		h.t.Fatal(err)
+	}
+	for _, r := range h.routes {
+		if err := srv.Channel(r.pattern, r.f); err != nil {
+			h.t.Fatal(err)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
@@ -781,26 +806,21 @@ func TestCredentialRefresh(t *testing.T) {
 
 func TestRevocationDuringAuthentication(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
-	srv := h.node()
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	slow := h.node()
-	_ = slow
-	// Replace the authenticator of both nodes with one that blocks for
-	// mallory, so the callout is in flight while Disconnect runs.
-	for _, n := range h.nodes {
-		n.Authenticate(func(ctx context.Context, r jetcast.AuthRequest) (jetcast.User, error) {
-			if strings.HasPrefix(r.Token, "mallory") {
-				select {
-				case entered <- struct{}{}:
-				default:
-				}
-				<-release
+	// Authentication blocks for mallory on both nodes, so the callout is in
+	// flight while Disconnect runs.
+	h.onAuth = func(_ context.Context, r jetcast.AuthRequest) {
+		if strings.HasPrefix(r.Token, "mallory") {
+			select {
+			case entered <- struct{}{}:
+			default:
 			}
-			user, session, _ := strings.Cut(strings.TrimSuffix(r.Token, ".std"), ":")
-			return jetcast.User{ID: user, Session: session, ConnectionTypes: []string{jetcast.ConnectionStandard}}, nil
-		})
+			<-release
+		}
 	}
+	srv := h.node()
+	h.node()
 	result := make(chan error, 1)
 	go func() {
 		nc, err := nats.Connect(h.env.URL, nats.Name("AAAAAAAAAAAAAAAAAAAAAF"), nats.Token("mallory:s1.std"), nats.NoReconnect())
@@ -861,15 +881,13 @@ func TestRequestValidation(t *testing.T) {
 
 func TestRevocationDuringRelayAuthorization(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
-	srv := h.node(func(o *jetcast.ServerOptions) { o.Admin = nil })
 	entered, release := make(chan struct{}), make(chan struct{})
-	if err := srv.Channel("slow.{id}", func(ctx context.Context, u jetcast.User, p jetcast.Params) (bool, error) {
+	h.channel("slow.{id}", func(ctx context.Context, u jetcast.User, p jetcast.Params) (bool, error) {
 		close(entered)
 		<-release
 		return true, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
+	srv := h.node(func(o *jetcast.ServerOptions) { o.Admin = nil })
 	a := h.client("alice:s1")
 	s := a.Private("slow.1")
 	c := collect(s)

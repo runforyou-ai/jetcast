@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/nats-io/jwt/v2"
@@ -12,9 +13,12 @@ import (
 )
 
 const (
-	// calloutTimeout bounds handling one auth callout request. Configure the
-	// server's authorization timeout above it.
+	// calloutTimeout bounds handling one auth callout request, from its
+	// arrival. Configure the server's authorization timeout above it.
 	calloutTimeout = 4 * time.Second
+	// calloutMinBudget is the least time left for a queued request to be
+	// worth handling.
+	calloutMinBudget = 500 * time.Millisecond
 	// revocationSkew tolerates clock differences between NATS servers when
 	// comparing revocation marks with the callout request time.
 	revocationSkew = 2 * time.Second
@@ -25,8 +29,54 @@ const (
 // errRejected is the user-facing rejection; details are only logged.
 var errRejected = errors.New("not authorized")
 
-// handleCallout answers one auth callout request.
-func (s *Server) handleCallout(m *nats.Msg) {
+// calloutRequest is a queued auth callout request.
+type calloutRequest struct {
+	m  *nats.Msg
+	at time.Time
+}
+
+// enqueueCallout queues an auth callout request for the callout workers. When
+// the queue is full the request is dropped: the NATS server times it out and
+// the client retries.
+func (s *Server) enqueueCallout(m *nats.Msg) {
+	select {
+	case <-s.ctx.Done():
+	case s.callouts <- calloutRequest{m: m, at: time.Now()}:
+	default:
+		s.calloutDropped.Add(1)
+		s.log.Debug("jetcast: callout queue full, request dropped")
+	}
+}
+
+// calloutWorker answers queued auth callout requests until Close.
+func (s *Server) calloutWorker() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case r := <-s.callouts:
+			// Close does not start queued requests.
+			if s.closed.Load() || s.ctx.Err() != nil {
+				return
+			}
+			// The time budget of a request starts when it arrives; the NATS
+			// server stops waiting for it soon after.
+			if time.Until(r.at.Add(calloutTimeout)) < calloutMinBudget {
+				s.calloutDropped.Add(1)
+				continue
+			}
+			s.handleCallout(r.m, r.at.Add(calloutTimeout))
+		}
+	}
+}
+
+// handleCallout answers one auth callout request before deadline.
+func (s *Server) handleCallout(m *nats.Msg, deadline time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("jetcast: callout handler panicked", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 	start := time.Now()
 	data := m.Data
 	serverXKey := m.Header.Get(xkeyHeader)
@@ -46,9 +96,9 @@ func (s *Server) handleCallout(m *nats.Msg) {
 		s.log.Warn("jetcast: decode callout request", "error", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, calloutTimeout)
+	ctx, cancel := context.WithDeadline(s.ctx, deadline)
 	defer cancel()
-	userJWT, err := s.authorizeConnection(ctx, rc)
+	userJWT, err := s.safeAuthorizeConnection(ctx, rc)
 	if err != nil {
 		s.calloutRejected.Add(1)
 		s.log.Debug("jetcast: connection rejected", "socket", rc.ConnectOptions.Name, "host", rc.ClientInformation.Host, "error", err)
@@ -90,6 +140,18 @@ func connectionType(clientType string) string {
 		return jwt.ConnectionTypeStandard
 	}
 	return clientType
+}
+
+// safeAuthorizeConnection runs authorizeConnection, rejecting the connection
+// when an application callback panics.
+func (s *Server) safeAuthorizeConnection(ctx context.Context, rc *jwt.AuthorizationRequestClaims) (token string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("jetcast: connection authentication panicked", "panic", r, "stack", string(debug.Stack()))
+			token, err = "", fmt.Errorf("authentication panicked: %v", r)
+		}
+	}()
+	return s.authorizeConnection(ctx, rc)
 }
 
 // authorizeConnection authenticates a connection, registers its socket and
