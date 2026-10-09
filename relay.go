@@ -193,6 +193,7 @@ func (r *relays) renew(ctx context.Context, socket string, rec *connRecord, sids
 		e          *relayEntry
 		authorized time.Time
 		attempted  time.Time
+		finished   time.Time
 		tried, ok  bool
 		err        error
 	}
@@ -241,12 +242,18 @@ run:
 		wg.Go(func() {
 			defer func() { <-r.reauthSlots; <-sem }()
 			d.ok, d.err = r.s.authorize(ctx, rec, d.e.channel)
+			d.finished = time.Now()
 		})
 	}
 	wg.Wait()
-	// Deadlines are checked against the time the callbacks finished.
 	done := time.Now()
 	for _, d := range reauth {
+		// Deadlines are checked when each callback finished, or now for
+		// relays not attempted.
+		end := done
+		if d.tried {
+			end = d.finished
+		}
 		e := d.e
 		ctl := ""
 		r.mu.Lock()
@@ -260,7 +267,7 @@ run:
 			e.authorized = now
 		case d.tried && d.err == nil:
 			ctl = CtlDenied
-		case e.authorized.Equal(d.authorized) && done.Sub(d.authorized) >= 2*r.s.opts.ReauthorizeInterval:
+		case e.authorized.Equal(d.authorized) && end.Sub(d.authorized) >= 2*r.s.opts.ReauthorizeInterval:
 			ctl = CtlInterrupted
 		}
 		if ctl != "" {
