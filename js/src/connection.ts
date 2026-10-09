@@ -10,6 +10,21 @@ export function encodeJSON(v: unknown): Uint8Array {
   return encoder.encode(JSON.stringify(v));
 }
 
+/** A request waiting for a slot. */
+interface Waiter {
+  resolve: () => void;
+  reject: (e: Error) => void;
+}
+
+/** Options of `Connection.request`. */
+export interface RequestOptions {
+  timeout?: number;
+  /** Served before other waiting requests. */
+  urgent?: boolean;
+  /** Checked once a slot is free; the request is not sent when it returns false. */
+  valid?: () => boolean;
+}
+
 /** Requests in flight when hello does not state the server's limit. */
 const defaultMaxRequests = 8;
 
@@ -18,12 +33,15 @@ export class Connection {
   hello: HelloResponse = {};
   /** When to switch to a fresh connection, in Unix milliseconds. */
   refreshAt = Number.POSITIVE_INFINITY;
-  /** Consecutive failed renewals per node. */
-  readonly renewFailures = new Map<string, number>();
+  /** Time of the last successful renewal, or of the first relay, per node. */
+  readonly renewedAt = new Map<string, number>();
+  /** Nodes with a renewal pending. */
+  readonly renewing = new Set<string>();
 
   private closeFns = new Set<() => void>();
   private inflight = 0;
-  private waiters: { resolve: () => void; reject: (e: Error) => void }[] = [];
+  private urgent: Waiter[] = [];
+  private normal: Waiter[] = [];
 
   constructor(
     readonly nc: NatsConnection,
@@ -34,30 +52,28 @@ export class Connection {
       for (const f of this.closeFns) f();
       this.closeFns.clear();
       const err = new Error("jetcast: connection closed");
-      for (const w of this.waiters.splice(0)) w.reject(err);
+      for (const w of [...this.urgent.splice(0), ...this.normal.splice(0)]) w.reject(err);
     });
   }
 
-  /** Jetcast-Origin value of events caused by this connection. */
-  get origin(): string {
-    // Servers before 0.2 tag events with the socket ID itself.
-    return this.hello.origin || this.socket;
-  }
-
-  /** Waits for a request slot; the server answers requests beyond its limit with "overloaded". */
-  acquire(): Promise<void> {
+  /**
+   * Waits for a request slot; the server answers requests beyond its limit
+   * with "overloaded". Urgent requests, such as relay renewals whose leases
+   * are running, are served first.
+   */
+  acquire(urgent = false): Promise<void> {
     if (this.nc.isClosed()) return Promise.reject(new Error("jetcast: connection closed"));
     const max = this.hello.maxRequests && this.hello.maxRequests > 0 ? this.hello.maxRequests : defaultMaxRequests;
-    if (this.inflight < max) {
+    if (this.inflight < max && (urgent || (this.urgent.length === 0 && this.normal.length === 0))) {
       this.inflight++;
       return Promise.resolve();
     }
-    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
+    return new Promise((resolve, reject) => (urgent ? this.urgent : this.normal).push({ resolve, reject }));
   }
 
   /** Releases a request slot, handing it to the next waiter. */
   release(): void {
-    const next = this.waiters.shift();
+    const next = this.urgent.shift() ?? this.normal.shift();
     if (next) next.resolve();
     else this.inflight--;
   }
@@ -97,10 +113,16 @@ export class Connection {
     return createInbox(`${this.ns}.r`);
   }
 
-  /** Sends a JSON request in a request slot and decodes the JSON response. The timeout starts once a slot is free. */
-  async request<T>(subject: string, body: unknown, timeout = 10_000): Promise<T> {
-    await this.acquire();
+  /**
+   * Sends a JSON request in a request slot and decodes the JSON response. The
+   * timeout starts once a slot is free. When `valid` reports false once the
+   * slot is free, the request is not sent.
+   */
+  async request<T>(subject: string, body: unknown, opts: RequestOptions = {}): Promise<T> {
+    const { timeout = 10_000, urgent = false, valid } = opts;
+    await this.acquire(urgent);
     try {
+      if (valid && !valid()) throw new Error("jetcast: request no longer needed");
       const m = await this.nc.request(subject, encodeJSON(body), { timeout });
       return m.json<T>();
     } finally {

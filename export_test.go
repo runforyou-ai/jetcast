@@ -63,6 +63,9 @@ func (s *Server) PauseNodeRequests() (resume func()) {
 	}
 }
 
+// OriginTag exposes the Jetcast-Origin value of a socket.
+func OriginTag(socket string) string { return originTag(socket) }
+
 // DropRelays stops relaying to a socket without telling the client.
 func (s *Server) DropRelays(socket string) { s.SuspendRelays(socket) }
 

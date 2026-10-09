@@ -358,6 +358,7 @@ describe("close", () => {
     const ch = c.echo.private(name);
     void c.echo.close();
     await expect(ch.ready()).rejects.toThrow(/closed/);
+    expect(ch.state).toBe("left");
   });
 });
 

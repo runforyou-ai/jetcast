@@ -191,12 +191,11 @@ export class Channel {
     conn.notify(conn.nodeRequestSubject(this.node, "leave"), { sid: this.sid });
   }
 
-  /** Rejects `ready()` when the client closes before the channel was first subscribed. @internal */
-  closeReady(): void {
-    if (this.readyDone) return;
-    this.readyDone = true;
-    const d = this.readyD;
-    this.host.call(() => d.reject(new Error("jetcast: client closed")));
+  /** Ends the channel when the client closes: it enters "left", and `ready()` rejects if it was never subscribed. @internal */
+  closed(): void {
+    this.gen++;
+    this.teardown();
+    this.setState({ state: "left", error: new Error("jetcast: client closed") });
   }
 
   /** Fails the subscription before it starts. @internal */
@@ -289,7 +288,11 @@ export class Channel {
     let resp: SubResponse | undefined;
     let failed = false;
     try {
-      resp = await conn.request<SubResponse>(conn.requestSubject("sub"), { channel: this.key, sid, path });
+      resp = await conn.request<SubResponse>(
+        conn.requestSubject("sub"),
+        { channel: this.key, sid, path },
+        { valid: () => this.gen === gen },
+      );
     } catch {
       failed = true;
     }
@@ -320,6 +323,9 @@ export class Channel {
     this.node = resp.node ?? "";
     this.recoverable = resp.recoverable;
     this.failures = 0;
+    if (resp.path === PathRelay && this.node !== "" && !conn.renewedAt.has(this.node)) {
+      conn.renewedAt.set(this.node, Date.now());
+    }
     if (!resp.recoverable) {
       this.setState({ state: "subscribed", recovered: false, reason: "ephemeral" });
       this.drain();
@@ -440,7 +446,7 @@ export class Channel {
       let res: RecoverResult | undefined;
       let msgs: Msg[] = [];
       try {
-        [res, msgs] = await this.recoverBatch(conn, req);
+        [res, msgs] = await this.recoverBatch(conn, gen, req);
       } catch {
         res = undefined;
       }
@@ -505,8 +511,18 @@ export class Channel {
   }
 
   /** Requests one recovery batch in a request slot and collects its events until the done message. */
-  private async recoverBatch(conn: Connection, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
+  private async recoverBatch(conn: Connection, gen: number, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
     await conn.acquire();
+    try {
+      if (this.gen !== gen) throw new Error("jetcast: request no longer needed");
+      return await this.recoverInSlot(conn, req);
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** Sends one recovery request and collects its events until the done message. */
+  private async recoverInSlot(conn: Connection, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
     const d = deferred<[RecoverResult, Msg[]]>();
     const msgs: Msg[] = [];
     const inbox = conn.newInbox();
@@ -538,7 +554,6 @@ export class Channel {
       clearTimeout(timer);
       offClose();
       sub.unsubscribe();
-      conn.release();
     }
   }
 

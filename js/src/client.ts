@@ -3,7 +3,7 @@
 
 import { NoRespondersError, RequestError, wsconnect, type Msg } from "@nats-io/nats-core";
 import { Connection, connNamespace } from "./connection.js";
-import { Header, type Control, type HeadsResponse, type HelloResponse, type RenewResponse } from "./protocol.js";
+import { CodeDenied, Header, type Control, type HeadsResponse, type HelloResponse, type RenewResponse } from "./protocol.js";
 import { Channel, type SubscriptionHost } from "./subscription.js";
 import { channelNameError, deferred, header, newSocketId, randInt } from "./util.js";
 
@@ -46,10 +46,16 @@ export type Status = "connecting" | "connected" | "reconnecting" | "stopped";
 const defaultLogger: Logger = { warn: (m, ...a) => console.warn(m, ...a) };
 
 /**
- * Consecutive failed renewals after which a node's relays are rebuilt
- * elsewhere; the node drops relays not renewed for three periods.
+ * Renewal periods without a successful renewal after which a node's relays
+ * are rebuilt elsewhere. The node drops relays not renewed for more than three
+ * periods, checking once per period.
  */
-const renewAttempts = 3;
+const renewGrace = 4;
+
+/** Relay renewal period stated in hello, in ms. */
+function renewPeriod(conn: Connection): number {
+  return conn.hello.renewMs && conn.hello.renewMs > 0 ? conn.hello.renewMs : 20_000;
+}
 
 /** Connects and resolves once the first connection is established. */
 export async function connect(opts: ConnectOptions): Promise<Echo> {
@@ -175,7 +181,7 @@ export class Echo {
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibility);
     for (const s of this.subs.values()) {
       s.sendLeave(conn);
-      s.closeReady();
+      s.closed();
     }
     if (conn && !conn.closed) {
       try {
@@ -342,14 +348,15 @@ export class Echo {
     }
     const old = this.conn;
     this.conn = conn;
+    // Events carry the digest of their origin; servers before 0.2, which may
+    // still publish during a rolling upgrade, carry the socket ID itself.
     const now = Date.now();
-    if (old) this.origins.set(old.origin, now);
-    // Events caused by older connections can only arrive while retained.
-    const keep = (conn.hello.maxAgeMs ?? 0) + 60_000;
-    for (const [origin, replaced] of this.origins) {
-      if (replaced !== 0 && now - replaced > keep) this.origins.delete(origin);
+    if (old) {
+      this.origins.set(old.socket, now);
+      if (old.hello.origin) this.origins.set(old.hello.origin, now);
     }
-    this.origins.set(conn.origin, 0);
+    this.origins.set(conn.socket, 0);
+    if (conn.hello.origin) this.origins.set(conn.hello.origin, 0);
     this.setStatus("connected");
     this.readyD.resolve();
     for (const s of [...this.subs.values()]) s.resubscribe(conn);
@@ -399,7 +406,12 @@ export class Echo {
     if (!conn || conn.closed) return;
     const now = Date.now();
     if (now >= conn.refreshAt) this.startConnecting(true);
-    const renew = conn.hello.renewMs && conn.hello.renewMs > 0 ? conn.hello.renewMs : 20_000;
+    // Events of replaced connections can only arrive while retained.
+    const keep = (conn.hello.maxAgeMs ?? 0) + 60_000;
+    for (const [origin, replaced] of this.origins) {
+      if (replaced !== 0 && now - replaced > keep) this.origins.delete(origin);
+    }
+    const renew = renewPeriod(conn);
     if (now - this.lastRenew >= renew - renew / 10 + randInt(renew / 10)) {
       this.lastRenew = now;
       void this.renew(conn);
@@ -444,30 +456,39 @@ export class Echo {
     }
     await Promise.all(
       [...byNode].map(async ([node, subs]) => {
+        // One renewal per node at a time; leases run while it waits, so it
+        // goes before other requests.
+        if (conn.renewing.has(node)) return;
+        conn.renewing.add(node);
         let resp: RenewResponse | undefined;
         let noResponders = false;
         try {
-          resp = await conn.request<RenewResponse>(conn.nodeRequestSubject(node, "renew"), {
-            sids: subs.map(([, sid]) => sid),
-          });
+          resp = await conn.request<RenewResponse>(
+            conn.nodeRequestSubject(node, "renew"),
+            { sids: subs.map(([, sid]) => sid) },
+            { urgent: true },
+          );
         } catch (e) {
           noResponders = e instanceof NoRespondersError || (e instanceof RequestError && e.isNoResponders());
+        } finally {
+          conn.renewing.delete(node);
         }
         if (this.conn !== conn) return;
         if (!resp || resp.error) {
-          // No responders means the node is gone. Other failures, such as an
+          // No responders means the node is gone, and denied that the
+          // connection is no longer registered. Other failures, such as an
           // overloaded node, are retried by the next renewals until the node
-          // has dropped the relays; then they are rebuilt elsewhere.
-          const failures = (conn.renewFailures.get(node) ?? 0) + 1;
-          if (!noResponders && failures < renewAttempts) {
-            conn.renewFailures.set(node, failures);
-            return;
-          }
-          conn.renewFailures.delete(node);
+          // must have dropped the relays; then they are rebuilt elsewhere.
+          const now = Date.now();
+          const last = conn.renewedAt.get(node) ?? now;
+          conn.renewedAt.set(node, last);
+          const gone = noResponders || resp?.error?.code === CodeDenied || now - last > renewGrace * renewPeriod(conn);
+          if (!gone) return;
+          conn.renewedAt.delete(node);
           for (const [s, sid] of subs) s.resubscribe(conn, sid);
           return;
         }
-        conn.renewFailures.delete(node);
+        conn.renewedAt.set(node, Date.now());
         const missing = new Set(resp.missing ?? []);
         for (const [s, sid] of subs) if (missing.has(sid)) s.resubscribe(conn, sid);
       }),

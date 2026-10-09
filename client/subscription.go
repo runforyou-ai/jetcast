@@ -194,16 +194,23 @@ func (s *Subscription) setStateLocked(st State) {
 	}
 }
 
-// closeReady fails Ready when the client closes before the subscription was
-// first established.
-func (s *Subscription) closeReady() {
+// current returns a function reporting whether attempt gen is still current.
+func (s *Subscription) current(gen int) func() bool {
+	return func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.gen == gen
+	}
+}
+
+// closed ends the subscription when the client closes: it enters StateLeft,
+// and Ready fails with ErrClosed if the subscription was never established.
+func (s *Subscription) closed() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.readyDone {
-		s.readyDone = true
-		s.readyErr = ErrClosed
-		close(s.ready)
-	}
+	s.gen++
+	s.teardownLocked()
+	s.setStateLocked(State{State: StateLeft, Err: ErrClosed})
 }
 
 // teardownLocked drops the direct subscription and pending messages.
@@ -329,7 +336,7 @@ func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 	}
 	var resp jetcast.SubResponse
 	err := conn.request(s.c.ctx, s.c.sub.request(conn.socket, "sub"),
-		jetcast.SubRequest{Channel: s.ch.String(), Sid: sid, Path: path}, &resp)
+		jetcast.SubRequest{Channel: s.ch.String(), Sid: sid, Path: path}, &resp, false, s.current(gen))
 
 	s.mu.Lock()
 	if s.gen != gen {
@@ -358,6 +365,9 @@ func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 	}
 	s.path, s.node, s.recoverable = resp.Path, resp.Node, resp.Recoverable
 	s.failures = 0
+	if resp.Path == jetcast.PathRelay {
+		conn.relayAt(resp.Node)
+	}
 	if !resp.Recoverable {
 		s.drainLocked()
 		s.setStateLocked(State{State: StateSubscribed, Recovered: false, Reason: jetcast.ReasonEphemeral})
@@ -485,7 +495,7 @@ func (s *Subscription) startRecoveryLocked(conn *connection, upTo uint64) {
 func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos, upTo uint64) {
 	events, bytes, broken := 0, 0, 0
 	for {
-		res, msgs, err := s.recoverBatch(conn, jetcast.RecoverRequest{
+		res, msgs, err := s.recoverBatch(conn, gen, jetcast.RecoverRequest{
 			Channel: s.ch.String(), Epoch: epoch, Pos: pos, UpTo: upTo,
 		})
 		s.mu.Lock()
@@ -584,12 +594,15 @@ func (s *Subscription) resetLocked(epoch string, position, head uint64, reason s
 }
 
 // recoverBatch requests one recovery batch and collects its events.
-func (s *Subscription) recoverBatch(conn *connection, req jetcast.RecoverRequest) (jetcast.RecoverResult, []*nats.Msg, error) {
+func (s *Subscription) recoverBatch(conn *connection, gen int, req jetcast.RecoverRequest) (jetcast.RecoverResult, []*nats.Msg, error) {
 	var res jetcast.RecoverResult
-	if err := conn.acquire(s.c.ctx); err != nil {
+	if err := conn.acquire(s.c.ctx, false); err != nil {
 		return res, nil, err
 	}
 	defer conn.release()
+	if !s.current(gen)() {
+		return res, nil, errStale
+	}
 	inbox := conn.nc.NewRespInbox()
 	ch := make(chan *nats.Msg, 4096)
 	sub, err := conn.nc.ChanSubscribe(inbox, ch)

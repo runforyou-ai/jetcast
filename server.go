@@ -160,7 +160,8 @@ type Stats struct {
 	Recoveries        uint64
 	RecoveryFailures  uint64
 	// Overloaded counts requests answered overloaded because the
-	// connection or the node had too many requests in flight.
+	// connection or the node had too many requests in flight. Subscriptions
+	// refused for the relay limits are not counted.
 	Overloaded uint64
 }
 
