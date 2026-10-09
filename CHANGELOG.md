@@ -6,14 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
 ### Added
 
-- `embedded.Accounts` renders the NATS accounts and auth callout configuration:
-  an application account and a separate client account that exchanges only
+- `embedded.Accounts` renders the NATS accounts and auth callout
+  configuration: an application account and a separate client account that exchanges only
   jetcast's subjects with it and carries per-connection subscription and
   payload limits (1000 subscriptions, 64 KiB by default) and an optional
   account connection limit. Development servers, tests and examples place
-  clients in the `CLIENT` account.
+  clients in the `CLIENT` account; existing configurations that place clients
+  in the application account keep working.
 - Deployment documentation of the client account, its limits and encrypted
   callouts (`CalloutXKey`).
 - `Stats.Overloaded` counts requests answered `overloaded` for too many
@@ -37,7 +40,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - A failed relay renewal no longer rebuilds every relay of the node at once:
   no responders and `denied` do; other failures are retried, one renewal per
   node at a time, and rebuild a relay after four renewal periods without a
-  successful renewal of it.
+  successful renewal of it. A renewal's lease starts when it is sent, after
+  waiting for a request slot.
 - Closing a client ends its subscriptions in the `left` state.
 - Heads requests no longer run channel authorizers: only public, granted and
   relayed channels get heads; others are reported denied.
@@ -96,6 +100,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - Go client and TypeScript SDK (`@runforyou/jetcast`).
 - Development server `cmd/jetcast-dev` and an embedded example.
 
-[Unreleased]: https://github.com/runforyou-ai/jetcast/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/runforyou-ai/jetcast/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/runforyou-ai/jetcast/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/runforyou-ai/jetcast/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/runforyou-ai/jetcast/releases/tag/v0.1.0
