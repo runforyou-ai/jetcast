@@ -3,6 +3,8 @@ package jetcast
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +84,19 @@ func (s *Server) handleRequest(m *nats.Msg) {
 		return
 	}
 	socket, op, node, _ := s.parseRequest(m.Subject)
+	// A panicking application callback fails the request, not the process.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("jetcast: request handler panicked", "op", op, "panic", r, "stack", string(debug.Stack()))
+			s.respondError(m, CodeUnavailable, "internal error")
+		}
+	}()
+	// Leaving only drops the connection's own relay, so it needs neither the
+	// connection record nor a request slot: clients can always release relays.
+	if op == opLeave && node {
+		s.handleLeave(m, socket)
+		return
+	}
 	s.inflightMu.Lock()
 	if s.inflight[socket] >= s.opts.Limits.ConcurrentRequests {
 		s.inflightMu.Unlock()
@@ -121,14 +136,13 @@ func (s *Server) handleRequest(m *nats.Msg) {
 		s.handleRecover(ctx, m, socket, rec)
 	case op == opRenew && node:
 		s.handleRenew(ctx, m, socket, rec)
-	case op == opLeave && node:
-		s.handleLeave(m, socket)
 	default:
 		s.respondError(m, CodeInvalid, "unknown operation")
 	}
 }
 
-// userOf rebuilds the authorizer's view of a connection's user.
+// userOf rebuilds the authorizer's view of a connection's user. Info is the
+// JSON encoding of the authenticated User.Info, as a json.RawMessage.
 func userOf(rec *connRecord) User {
 	u := User{ID: rec.User, Session: rec.Session, ExpiresAt: time.UnixMilli(rec.ExpiresAt)}
 	if len(rec.Info) > 0 {
@@ -150,18 +164,32 @@ func (s *Server) handleHello(ctx context.Context, m *nats.Msg, rec *connRecord) 
 	})
 }
 
-// authorize runs the channel authorizer for a private channel.
-func (s *Server) authorize(ctx context.Context, rec *connRecord, c Channel) (bool, error) {
+// authorize runs the channel authorizer for a private channel. A panicking
+// authorizer counts as a failed one.
+func (s *Server) authorize(ctx context.Context, rec *connRecord, c Channel) (ok bool, err error) {
 	f, params := s.route(c.Name)
 	if f == nil {
 		return false, nil
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("jetcast: channel authorizer panicked", "channel", c.Name, "panic", r, "stack", string(debug.Stack()))
+			ok, err = false, fmt.Errorf("jetcast: channel authorizer panicked: %v", r)
+		}
+	}()
 	return f(ctx, userOf(rec), params)
+}
+
+// subscribed reports whether a connection may read a channel's events without
+// asking the authorizer: public channels, granted channels and channels this
+// node relays to it.
+func (s *Server) subscribed(rec *connRecord, socket string, c Channel) bool {
+	return c.Kind == KindPublic || rec.granted(c.Name) || s.relays.has(socket, c)
 }
 
 // canRead reports whether a connection may read a channel's events.
 func (s *Server) canRead(ctx context.Context, rec *connRecord, socket string, c Channel) (bool, error) {
-	if c.Kind == KindPublic || rec.granted(c.Name) || s.relays.has(socket, c) {
+	if s.subscribed(rec, socket, c) {
 		return true, nil
 	}
 	return s.authorize(ctx, rec, c)
@@ -248,12 +276,12 @@ func (s *Server) handleHeads(ctx context.Context, m *nats.Msg, socket string, re
 				resp.Denied = append(resp.Denied, name)
 				continue
 			}
-			var ok bool
-			if node {
-				ok = s.relays.has(socket, c)
-			} else if ok, err = s.canRead(ctx, rec, socket, c); err != nil {
-				s.respondError(m, CodeUnavailable, "authorization failed")
-				return
+			// Heads never run authorizers: clients only check channels they
+			// subscribed to, which are public, granted or relayed. One
+			// request could otherwise run hundreds of authorizer calls.
+			ok := s.relays.has(socket, c)
+			if !node {
+				ok = s.subscribed(rec, socket, c)
 			}
 			if !ok {
 				resp.Denied = append(resp.Denied, name)

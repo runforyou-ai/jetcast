@@ -47,6 +47,8 @@ type User struct {
 	// MaxConnectionTTL.
 	ExpiresAt time.Time
 	// Info is public data about the user, returned to the client by hello.
+	// GrantsFunc receives it as returned by Authenticate; AuthorizeFunc
+	// receives its JSON encoding as a json.RawMessage.
 	Info any
 	// ConnectionTypes lists the allowed connection types; WebSocket only by
 	// default.
@@ -84,6 +86,9 @@ type Limits struct {
 	RecoverBytes int
 	// HeadsChannels caps the channels of one heads request, 200 by default.
 	HeadsChannels int
+	// ConcurrentCallouts caps auth callout requests handled at once on the
+	// node, 32 by default. Further requests wait in a queue.
+	ConcurrentCallouts int
 }
 
 func (l Limits) withDefaults() Limits {
@@ -98,6 +103,7 @@ func (l Limits) withDefaults() Limits {
 	def(&l.RecoverCount, 100)
 	def(&l.RecoverBytes, 512<<10)
 	def(&l.HeadsChannels, 200)
+	def(&l.ConcurrentCallouts, 32)
 	return l
 }
 
@@ -137,8 +143,11 @@ type ServerOptions struct {
 
 // Stats are cumulative counters of a server node.
 type Stats struct {
-	CalloutAccepted   uint64
-	CalloutRejected   uint64
+	CalloutAccepted uint64
+	CalloutRejected uint64
+	// CalloutDropped counts callout requests dropped because the queue was
+	// full or they waited too long.
+	CalloutDropped    uint64
 	CalloutLatencyAvg time.Duration
 	Relays            int
 	RelayedEvents     uint64
@@ -167,19 +176,20 @@ type Server struct {
 	grants       GrantsFunc
 	channels     []channelRoute
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	subs    []*nats.Subscription
-	work    chan *nats.Msg
-	wg      sync.WaitGroup
-	started atomic.Bool
-	closed  atomic.Bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	subs     []*nats.Subscription
+	work     chan *nats.Msg
+	callouts chan calloutRequest
+	wg       sync.WaitGroup
+	started  atomic.Bool
+	closed   atomic.Bool
 
 	inflightMu sync.Mutex
 	inflight   map[string]int
 
 	calloutAccepted, calloutRejected atomic.Uint64
-	calloutNanos                     atomic.Uint64
+	calloutDropped, calloutNanos     atomic.Uint64
 	relayed, recoveries, recFailures atomic.Uint64
 }
 
@@ -233,17 +243,36 @@ func NewServer(nc *nats.Conn, opts ServerOptions) (*Server, error) {
 // Node returns the ID of this server node, random per process.
 func (s *Server) Node() string { return s.node }
 
-// Authenticate registers the connection authenticator. It is required.
-func (s *Server) Authenticate(f AuthenticateFunc) { s.authenticate = f }
+// errStarted reports a registration after Start.
+var errStarted = fmt.Errorf("%w: callbacks must be registered before Start", ErrInvalidConfig)
+
+// Authenticate registers the connection authenticator. It is required and
+// must be called before Start; it panics afterwards.
+func (s *Server) Authenticate(f AuthenticateFunc) {
+	if s.started.Load() {
+		panic(errStarted)
+	}
+	s.authenticate = f
+}
 
 // Grants registers the function returning directly subscribable private
-// channel patterns. Optional.
-func (s *Server) Grants(f GrantsFunc) { s.grants = f }
+// channel patterns. Optional; it must be called before Start and panics
+// afterwards.
+func (s *Server) Grants(f GrantsFunc) {
+	if s.started.Load() {
+		panic(errStarted)
+	}
+	s.grants = f
+}
 
 // Channel registers the authorizer of private channels matching pattern.
 // Pattern tokens are literals or "{name}" placeholders matching one token,
-// like "orders.{id}". The first matching pattern decides.
+// like "orders.{id}". The first matching pattern decides. Channels must be
+// registered before Start; Channel returns an error afterwards.
 func (s *Server) Channel(pattern string, f AuthorizeFunc) error {
+	if s.started.Load() {
+		return errStarted
+	}
 	tokens := strings.Split(pattern, ".")
 	check := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -305,6 +334,10 @@ func (s *Server) Start(ctx context.Context) error {
 	for range 64 {
 		s.wg.Go(s.worker)
 	}
+	s.callouts = make(chan calloutRequest, 1024)
+	for range s.opts.Limits.ConcurrentCallouts {
+		s.wg.Go(s.calloutWorker)
+	}
 	subscribe := func(subject, queue string, h nats.MsgHandler) error {
 		var sub *nats.Subscription
 		var err error
@@ -329,7 +362,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 	queue := s.opts.Config.Prefix
-	if err := subscribe("$SYS.REQ.USER.AUTH", queue, func(m *nats.Msg) { go s.handleCallout(m) }); err != nil {
+	if err := subscribe("$SYS.REQ.USER.AUTH", queue, s.enqueueCallout); err != nil {
 		return err
 	}
 	if err := subscribe(s.sub.requests(), queue, enqueue); err != nil {
@@ -372,6 +405,7 @@ func (s *Server) Stats() Stats {
 	st := Stats{
 		CalloutAccepted:  s.calloutAccepted.Load(),
 		CalloutRejected:  s.calloutRejected.Load(),
+		CalloutDropped:   s.calloutDropped.Load(),
 		Relays:           s.relays.count(),
 		RelayedEvents:    s.relayed.Load(),
 		Recoveries:       s.recoveries.Load(),
@@ -382,6 +416,11 @@ func (s *Server) Stats() Stats {
 	}
 	return st
 }
+
+// registrySkew is the minimum margin of the registry TTL over
+// MaxConnectionTTL, covering clock differences between NATS servers and
+// application nodes, so records outlive their connections.
+const registrySkew = time.Minute
 
 // ensureStorage creates, updates or validates the event stream and the
 // registry bucket.
@@ -430,8 +469,8 @@ func (s *Server) ensureStorage(ctx context.Context) (jetstream.Stream, jetstream
 	if err != nil {
 		return nil, nil, fmt.Errorf("jetcast: registry bucket %s: %w", bucket, err)
 	}
-	if c := st.CachedInfo().Config; c.AllowDirect || c.MaxAge < s.opts.MaxConnectionTTL {
-		return nil, nil, fmt.Errorf("jetcast: registry bucket %s needs direct get disabled and a TTL above MaxConnectionTTL", bucket)
+	if c := st.CachedInfo().Config; c.AllowDirect || c.MaxAge != 0 && c.MaxAge < s.opts.MaxConnectionTTL+registrySkew {
+		return nil, nil, fmt.Errorf("jetcast: registry bucket %s needs direct get disabled and a TTL of at least MaxConnectionTTL plus %v", bucket, registrySkew)
 	}
 	kv, err := s.js.KeyValue(ctx, bucket)
 	if err != nil {
@@ -582,22 +621,25 @@ type DisconnectResult struct {
 // revoked so their requests are denied, stops their relays, asks clients to
 // close and kicks them through the ConnectionAdmin. Repeated calls retry
 // enforcement for existing revoked records. Callers must retry errors to
-// complete enforcement. Invalidate the session in the application first, or
-// clients reconnect with the same credentials.
+// complete enforcement; a failure to write the revocation mark is reported
+// after the existing connections were revoked. Invalidate the session in the
+// application first, or clients reconnect with the same credentials.
 func (s *Server) Disconnect(ctx context.Context, t Target) (DisconnectResult, error) {
 	res := DisconnectResult{Enforced: s.opts.Admin != nil}
 	if err := ValidateID(t.User); err != nil {
 		return res, err
 	}
+	var errs []error
+	// Without the mark, authentications in progress may still succeed, so the
+	// error is returned for a retry; existing connections are revoked anyway.
 	if err := s.reg.markRevoked(ctx, t.User, t.Session); err != nil {
-		return res, err
+		errs = append(errs, err)
 	}
 	sockets, err := s.targetSockets(ctx, t)
 	if err != nil {
-		return res, err
+		return res, errors.Join(append(errs, err)...)
 	}
 	res.Connections = len(sockets)
-	var errs []error
 	var revoked []*connRecord
 	var revokedSockets []string
 	for _, socket := range sockets {

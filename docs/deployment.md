@@ -50,6 +50,10 @@ authorization {
 }
 ```
 
+Without `ManageStreams`, create the event stream and the registry bucket yourself; the
+bucket `<Stream>_CONN` needs direct gets disabled and a TTL of at least
+`MaxConnectionTTL` plus one minute (`ManageStreams` uses plus ten minutes).
+
 Generate the issuer with `nsc` or in Go with `nkeys.CreateAccount()`, and keep its seed
 secret: it signs every client's permissions.
 

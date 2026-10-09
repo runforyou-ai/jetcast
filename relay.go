@@ -3,6 +3,7 @@ package jetcast
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -73,7 +74,10 @@ func (r *relays) add(ctx context.Context, socket string, rec *connRecord, c Chan
 		if e.channel != c {
 			return CodeInvalid, errSidReused
 		}
-		return "", r.s.flush(ctx)
+		if err := r.s.flush(ctx); err != nil {
+			return CodeUnavailable, err
+		}
+		return "", nil
 	}
 	if len(r.bySocket[socket]) >= r.s.opts.Limits.RelaysPerConnection || r.total >= r.s.opts.Limits.RelaysPerNode {
 		r.mu.Unlock()
@@ -158,13 +162,30 @@ func (r *relays) has(socket string, c Channel) bool {
 	return false
 }
 
+// Reauthorization in one renewal is bounded so that renew requests stay
+// short: at most reauthPerRenew due relays, most overdue first, with
+// reauthConcurrency authorizer calls at a time. Later renewals handle the rest.
+const (
+	reauthPerRenew    = 20
+	reauthConcurrency = 4
+)
+
 // renew extends the leases of a connection's sids and returns those the node
 // no longer relays. Subscriptions due for reauthorization are authorized
-// again; denied ones are removed and the client is told.
+// again: denied ones are removed and the client is told. When the authorizer
+// fails, the relay is kept and retried on later renewals, until it has not
+// been authorized for twice the ReauthorizeInterval; then it is removed and
+// the client is told to subscribe again, which authorizes it afresh.
 func (r *relays) renew(ctx context.Context, socket string, rec *connRecord, sids []string) []string {
 	now := time.Now()
+	type due struct {
+		e          *relayEntry
+		authorized time.Time
+		ok         bool
+		err        error
+	}
 	var missing []string
-	var reauth []*relayEntry
+	var reauth []*due
 	r.mu.Lock()
 	for _, sid := range sids {
 		e := r.bySid[sidKey(socket, sid)]
@@ -174,25 +195,43 @@ func (r *relays) renew(ctx context.Context, socket string, rec *connRecord, sids
 		}
 		e.renewed, e.rec = now, rec
 		if now.Sub(e.authorized) >= r.s.opts.ReauthorizeInterval {
-			reauth = append(reauth, e)
+			reauth = append(reauth, &due{e: e, authorized: e.authorized})
 		}
 	}
 	r.mu.Unlock()
-	for _, e := range reauth {
-		ok, err := r.s.authorize(ctx, rec, e.channel)
-		if err != nil {
-			r.s.log.Warn("jetcast: reauthorize relay", "channel", e.channel.Name, "error", err)
-			continue
-		}
-		if !ok {
+	slices.SortFunc(reauth, func(a, b *due) int { return a.authorized.Compare(b.authorized) })
+	if len(reauth) > reauthPerRenew {
+		reauth = reauth[:reauthPerRenew]
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, reauthConcurrency)
+	for _, d := range reauth {
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			d.ok, d.err = r.s.authorize(ctx, rec, d.e.channel)
+		})
+	}
+	wg.Wait()
+	for _, d := range reauth {
+		e := d.e
+		switch {
+		case d.err == nil && d.ok:
+			r.mu.Lock()
+			e.authorized = now
+			r.mu.Unlock()
+		case d.err == nil:
 			r.remove(socket, e.sid)
 			r.s.control(socket, Control{Type: CtlDenied, Sid: e.sid, Channel: e.channel.String()})
 			missing = append(missing, e.sid)
-			continue
+		case now.Sub(d.authorized) >= 2*r.s.opts.ReauthorizeInterval:
+			r.s.log.Warn("jetcast: reauthorize relay failed, relay removed", "channel", e.channel.Name, "error", d.err)
+			r.remove(socket, e.sid)
+			r.s.control(socket, Control{Type: CtlInterrupted, Sid: e.sid, Channel: e.channel.String()})
+			missing = append(missing, e.sid)
+		default:
+			r.s.log.Warn("jetcast: reauthorize relay failed, retrying on next renewal", "channel", e.channel.Name, "error", d.err)
 		}
-		r.mu.Lock()
-		e.authorized = now
-		r.mu.Unlock()
 	}
 	return missing
 }
