@@ -33,7 +33,7 @@ type harness struct {
 	// routes are extra channel authorizers registered on every node.
 	routes []route
 	// onAuth runs at the start of every authentication.
-	onAuth func(jetcast.AuthRequest)
+	onAuth func(context.Context, jetcast.AuthRequest)
 }
 
 type route struct {
@@ -84,7 +84,7 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 	// connections.
 	srv.Authenticate(func(ctx context.Context, r jetcast.AuthRequest) (jetcast.User, error) {
 		if h.onAuth != nil {
-			h.onAuth(r)
+			h.onAuth(ctx, r)
 		}
 		h.mu.Lock()
 		bad := h.invalid[r.Token]
@@ -98,6 +98,9 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 		return u, nil
 	})
 	srv.Grants(func(ctx context.Context, u jetcast.User) ([]string, error) {
+		if u.ID == "gpanic" {
+			panic("grants failure")
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		return h.grants[u.ID], nil
@@ -807,7 +810,7 @@ func TestRevocationDuringAuthentication(t *testing.T) {
 	release := make(chan struct{})
 	// Authentication blocks for mallory on both nodes, so the callout is in
 	// flight while Disconnect runs.
-	h.onAuth = func(r jetcast.AuthRequest) {
+	h.onAuth = func(_ context.Context, r jetcast.AuthRequest) {
 		if strings.HasPrefix(r.Token, "mallory") {
 			select {
 			case entered <- struct{}{}:

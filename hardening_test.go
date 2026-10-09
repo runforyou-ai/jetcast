@@ -100,7 +100,7 @@ func TestHeadsDoNotRunAuthorizers(t *testing.T) {
 
 func TestPanickingCallbacks(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
-	h.onAuth = func(r jetcast.AuthRequest) {
+	h.onAuth = func(_ context.Context, r jetcast.AuthRequest) {
 		if strings.HasPrefix(r.Token, "panic:") {
 			panic("authenticate failure")
 		}
@@ -111,6 +111,9 @@ func TestPanickingCallbacks(t *testing.T) {
 	srv := h.node()
 	if _, err := h.dialRaw("panic:s1.std"); err == nil {
 		t.Fatal("connection accepted although Authenticate panicked")
+	}
+	if _, err := h.dialRaw("gpanic:s1.std"); err == nil {
+		t.Fatal("connection accepted although Grants panicked")
 	}
 	c, err := h.dialRaw("alice:s1.std")
 	if err != nil {
@@ -126,7 +129,7 @@ func TestPanickingCallbacks(t *testing.T) {
 	if hello.Error != nil {
 		t.Fatalf("hello after a panicking authorizer: %+v", hello.Error)
 	}
-	if st := srv.Stats(); st.CalloutRejected != 1 || st.CalloutAccepted != 1 {
+	if st := srv.Stats(); st.CalloutRejected != 2 || st.CalloutAccepted != 1 {
 		t.Fatalf("stats %+v", st)
 	}
 }
@@ -135,10 +138,12 @@ func TestCalloutConcurrencyAndClose(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
 	var running, peak atomic.Int64
 	release := make(chan struct{})
-	h.onAuth = func(r jetcast.AuthRequest) {
+	var started atomic.Int64
+	h.onAuth = func(_ context.Context, r jetcast.AuthRequest) {
 		if !strings.HasPrefix(r.Token, "slow") {
 			return
 		}
+		started.Add(1)
 		n := running.Add(1)
 		for {
 			p := peak.Load()
@@ -176,6 +181,33 @@ func TestCalloutConcurrencyAndClose(t *testing.T) {
 		t.Fatal("Close did not return after callouts finished")
 	}
 	wg.Wait()
+	// Close does not start the callouts still queued.
+	if n := started.Load(); n != 2 {
+		t.Fatalf("%d callouts started, want 2", n)
+	}
+}
+
+func TestCalloutBudgetIncludesQueueing(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	budgets := make(chan time.Duration, 2)
+	h.onAuth = func(ctx context.Context, r jetcast.AuthRequest) {
+		if !strings.HasPrefix(r.Token, "slow") {
+			return
+		}
+		deadline, _ := ctx.Deadline()
+		budgets <- time.Until(deadline)
+		time.Sleep(2 * time.Second)
+	}
+	h.node(func(o *jetcast.ServerOptions) { o.Limits.ConcurrentCallouts = 1 })
+	var wg sync.WaitGroup
+	for i := range 2 {
+		wg.Go(func() { _, _ = h.dialRaw(fmt.Sprintf("slow%d:s1.std", i)) })
+	}
+	first, second := <-budgets, <-budgets
+	wg.Wait()
+	if first < 3*time.Second || second > 2500*time.Millisecond {
+		t.Fatalf("budgets %v and %v: the queued callout got a fresh budget", first, second)
+	}
 }
 
 func TestRegistrationAfterStart(t *testing.T) {
@@ -201,13 +233,15 @@ func TestRegistrationAfterStart(t *testing.T) {
 func TestReauthorizationFailure(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
 	var failing atomic.Bool
+	var failures atomic.Int64
 	h.channel("flaky.{id}", func(context.Context, jetcast.User, jetcast.Params) (bool, error) {
 		if failing.Load() {
+			failures.Add(1)
 			return false, errors.New("database unavailable")
 		}
 		return true, nil
 	})
-	srv := h.node(func(o *jetcast.ServerOptions) { o.ReauthorizeInterval = 500 * time.Millisecond })
+	srv := h.node(func(o *jetcast.ServerOptions) { o.ReauthorizeInterval = time.Second })
 	a := h.client("alice:s1")
 	s := a.Private("flaky.1")
 	c := collect(s)
@@ -216,6 +250,9 @@ func TestReauthorizationFailure(t *testing.T) {
 	// Failed reauthorizations keep the relay for a while, then remove it and
 	// make the client subscribe again instead of relaying indefinitely.
 	c.waitState(t, client.StateInterrupted)
+	if n := failures.Load(); n < 2 {
+		t.Fatalf("relay removed after %d failed reauthorization", n)
+	}
 	waitFor(t, func() bool { return srv.Stats().Relays == 0 })
 	if st := s.State(); st == client.StateDenied {
 		t.Fatal("subscription denied after authorizer failures")
@@ -224,6 +261,39 @@ func TestReauthorizationFailure(t *testing.T) {
 	c.waitState(t, client.StateSubscribed)
 	h.broadcast(srv, "e", "1", jetcast.Private("flaky.1"))
 	c.expectData(t, "1")
+}
+
+func TestReauthorizationRotates(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	var failing atomic.Bool
+	var mu sync.Mutex
+	attempted := map[string]bool{}
+	h.channel("rot.{id}", func(_ context.Context, _ jetcast.User, p jetcast.Params) (bool, error) {
+		if !failing.Load() {
+			return true, nil
+		}
+		mu.Lock()
+		attempted[p["id"]] = true
+		mu.Unlock()
+		return false, errors.New("database unavailable")
+	})
+	srv := h.node(func(o *jetcast.ServerOptions) { o.ReauthorizeInterval = 3 * time.Second })
+	a := h.client("alice:s1")
+	const n = 60
+	for i := range n {
+		ready(t, a.Private(fmt.Sprintf("rot.r%d", i)))
+	}
+	failing.Store(true)
+	// Failing relays do not take every reauthorization slot: all of them
+	// are attempted before the first is removed.
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(attempted) == n
+	})
+	if r := srv.Stats().Relays; r != n {
+		t.Fatalf("%d relays left before the reauthorization deadline", r)
+	}
 }
 
 func TestRegistryTTLMargin(t *testing.T) {

@@ -87,7 +87,9 @@ type Limits struct {
 	// HeadsChannels caps the channels of one heads request, 200 by default.
 	HeadsChannels int
 	// ConcurrentCallouts caps auth callout requests handled at once on the
-	// node, 32 by default. Further requests wait in a queue.
+	// node, 32 by default. Further requests wait in a queue four times as
+	// long; requests that do not fit or wait too long are dropped, and the
+	// client retries.
 	ConcurrentCallouts int
 }
 
@@ -172,6 +174,8 @@ type Server struct {
 	maxAge time.Duration // retention of the event stream as configured
 	relays *relays
 
+	// regMu orders callback registration with Start.
+	regMu        sync.Mutex
 	authenticate AuthenticateFunc
 	grants       GrantsFunc
 	channels     []channelRoute
@@ -249,6 +253,8 @@ var errStarted = fmt.Errorf("%w: callbacks must be registered before Start", Err
 // Authenticate registers the connection authenticator. It is required and
 // must be called before Start; it panics afterwards.
 func (s *Server) Authenticate(f AuthenticateFunc) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
 	if s.started.Load() {
 		panic(errStarted)
 	}
@@ -259,6 +265,8 @@ func (s *Server) Authenticate(f AuthenticateFunc) {
 // channel patterns. Optional; it must be called before Start and panics
 // afterwards.
 func (s *Server) Grants(f GrantsFunc) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
 	if s.started.Load() {
 		panic(errStarted)
 	}
@@ -270,6 +278,8 @@ func (s *Server) Grants(f GrantsFunc) {
 // like "orders.{id}". The first matching pattern decides. Channels must be
 // registered before Start; Channel returns an error afterwards.
 func (s *Server) Channel(pattern string, f AuthorizeFunc) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
 	if s.started.Load() {
 		return errStarted
 	}
@@ -316,12 +326,16 @@ func (s *Server) route(name string) (AuthorizeFunc, Params) {
 // Start ensures the stream and registry, then serves the auth callout and
 // client requests until Close.
 func (s *Server) Start(ctx context.Context) error {
+	s.regMu.Lock()
 	if s.authenticate == nil {
+		s.regMu.Unlock()
 		return fmt.Errorf("%w: Authenticate is required", ErrInvalidConfig)
 	}
 	if !s.started.CompareAndSwap(false, true) {
+		s.regMu.Unlock()
 		return errors.New("jetcast: server already started")
 	}
+	s.regMu.Unlock()
 	stream, kv, err := s.ensureStorage(ctx)
 	if err != nil {
 		return err
@@ -334,7 +348,8 @@ func (s *Server) Start(ctx context.Context) error {
 	for range 64 {
 		s.wg.Go(s.worker)
 	}
-	s.callouts = make(chan calloutRequest, 1024)
+	// Requests queued beyond a few rounds of the workers would expire.
+	s.callouts = make(chan calloutRequest, 4*s.opts.Limits.ConcurrentCallouts)
 	for range s.opts.Limits.ConcurrentCallouts {
 		s.wg.Go(s.calloutWorker)
 	}

@@ -64,7 +64,7 @@ JetStream
 5. 读取吊销标记 `x.<user>` 与 `x.<user>.<session>`。标记的写入时间（JetStream 服务端时间）不早于 callout 请求的签发时间 `iat`（NATS 服务端时间，留 2 秒余量）时，说明认证进行期间发生了吊销：把登记标为已吊销并拒绝连接，客户端重试时会重新认证。
 6. 签发 JWT 并回复。
 
-callout 请求进入节点内的队列，由固定数量的 worker 处理（`Limits.ConcurrentCallouts`，默认 32）；队列满或排队超过 callout 超时的请求被丢弃，由 NATS 认证超时后客户端重试。`Authenticate`、`Grants` 与频道授权回调 panic 时按失败处理：连接被拒绝、请求回复 `unavailable`，进程不退出。回调必须在 `Start` 之前注册。
+callout 请求进入节点内的队列（容量为 worker 数的 4 倍），由固定数量的 worker 处理（`Limits.ConcurrentCallouts`，默认 32）。每个请求的 4 秒预算从到达时起算，剩余不足 0.5 秒或队列已满的请求被丢弃，由 NATS 认证超时后客户端重试；`Close` 后不再开始排队中的请求。`Authenticate`、`Grants` 与频道授权回调 panic 时按失败处理：连接被拒绝、请求回复 `unavailable`，进程不退出。回调必须在 `Start` 之前注册。
 
 与 `Disconnect` 的竞态由“先写后查”闭合：`Disconnect` 先写吊销标记、再按索引吊销登记；callout 先写登记与索引、再查吊销标记。两者交错时至少有一方能看到另一方的写入：要么 callout 拒绝连接，要么 `Disconnect` 吊销刚登记的连接。后一种情况下 JWT 已经签发，没有配置 `ConnectionAdmin` 时只能依靠控制消息与 JWT 过期；应用先使会话失效可以避免客户端再次认证成功。中继在建立后会再读一次登记，已吊销则立即移除。
 
@@ -145,7 +145,7 @@ jetcast 的序号只保证传输层连续，不是业务数据的版本；业务
 - SDK 按节点合并续约：每 20 秒（带抖动）向持有中继的每个节点发 `n.<node>.renew`，携带该节点上的全部 `sid`；节点回复其中已不存在的 `sid`，SDK 对它们重新订阅。
 - 续约 no responders 或超时：该节点上的频道标为 `interrupted`，带游标重新订阅。
 - 节点 3 个续约周期收不到续约就移除中继；续约时登记已吊销或过期，或重新授权被拒绝，移除中继并向 `ctl` 发送带 `sid` 的 `denied`。
-- 重新授权在续约请求中进行，每次最多处理 20 个到期中继（最久未授权的优先）、同时最多 4 个回调。回调出错时保留中继并在后续续约中重试；距上次成功授权超过 2 个 `ReauthorizeInterval` 仍未成功时移除中继并发送 `interrupted`，SDK 重新订阅，由订阅时的授权回调重新判断。
+- 重新授权在续约请求中进行，每次最多处理 50 个到期中继（最久未尝试的优先），每次续约同时最多 4 个回调、每个节点同时最多 16 个。回调出错或本轮未轮到时保留中继，在后续续约中重试；距上次成功授权超过 2 个 `ReauthorizeInterval` 仍未成功时移除中继并发送 `interrupted`，SDK 重新订阅，由订阅时的授权回调重新判断。
 - 节点自身 NATS 连接断开恢复后，向本节点全部中继发送带 `sid` 的 `interrupted`，SDK 重新订阅并补发。
 - 退订：SDK 向持有节点发送 `n.<node>.leave`。`leave` 只移除本连接自己的中继，不读登记、不占并发请求名额。
 - `Server.Close()`：停止接收请求，向本节点中继发送 `interrupted`，然后取消订阅。

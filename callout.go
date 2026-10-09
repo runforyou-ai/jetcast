@@ -13,9 +13,12 @@ import (
 )
 
 const (
-	// calloutTimeout bounds handling one auth callout request. Configure the
-	// server's authorization timeout above it.
+	// calloutTimeout bounds handling one auth callout request, from its
+	// arrival. Configure the server's authorization timeout above it.
 	calloutTimeout = 4 * time.Second
+	// calloutMinBudget is the least time left for a queued request to be
+	// worth handling.
+	calloutMinBudget = 500 * time.Millisecond
 	// revocationSkew tolerates clock differences between NATS servers when
 	// comparing revocation marks with the callout request time.
 	revocationSkew = 2 * time.Second
@@ -52,18 +55,23 @@ func (s *Server) calloutWorker() {
 		case <-s.ctx.Done():
 			return
 		case r := <-s.callouts:
-			// The NATS server stopped waiting for requests queued too long.
-			if time.Since(r.at) >= calloutTimeout {
+			// Close does not start queued requests.
+			if s.ctx.Err() != nil {
+				return
+			}
+			// The time budget of a request starts when it arrives; the NATS
+			// server stops waiting for it soon after.
+			if time.Until(r.at.Add(calloutTimeout)) < calloutMinBudget {
 				s.calloutDropped.Add(1)
 				continue
 			}
-			s.handleCallout(r.m)
+			s.handleCallout(r.m, r.at.Add(calloutTimeout))
 		}
 	}
 }
 
-// handleCallout answers one auth callout request.
-func (s *Server) handleCallout(m *nats.Msg) {
+// handleCallout answers one auth callout request before deadline.
+func (s *Server) handleCallout(m *nats.Msg, deadline time.Time) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.log.Error("jetcast: callout handler panicked", "panic", r, "stack", string(debug.Stack()))
@@ -88,7 +96,7 @@ func (s *Server) handleCallout(m *nats.Msg) {
 		s.log.Warn("jetcast: decode callout request", "error", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, calloutTimeout)
+	ctx, cancel := context.WithDeadline(s.ctx, deadline)
 	defer cancel()
 	userJWT, err := s.safeAuthorizeConnection(ctx, rc)
 	if err != nil {
