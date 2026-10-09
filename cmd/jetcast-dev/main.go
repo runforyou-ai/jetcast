@@ -74,7 +74,7 @@ func main() {
 	}
 	srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{
 		Config:           cfg,
-		Account:          "APP",
+		Account:          env.ClientAccount,
 		CalloutSigner:    env.Issuer,
 		Admin:            embedded.Admin(env.Server),
 		ManageStreams:    true,

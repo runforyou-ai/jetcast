@@ -35,22 +35,19 @@ func main() {
 	pub, _ := issuer.PublicKey()
 
 	// Embedded NATS: JetStream, a loopback WebSocket listener, the APP
-	// account for clients and the application, and an auth callout. The same
+	// account for the application, the CLIENT account the auth callout
+	// places browsers in, with its limits, and the system account. The same
 	// configuration works for a standalone nats-server.
+	accounts, err := embedded.Accounts{AppPassword: "app", SystemPassword: "sys", Issuer: pub}.Config()
+	if err != nil {
+		log.Fatal(err)
+	}
 	conf := fmt.Sprintf(`
 listen: "127.0.0.1:-1"
 jetstream { store_dir: %q }
 websocket { listen: "127.0.0.1:8222", no_tls: true }
-accounts {
-  APP { jetstream: enabled, users: [ { user: app, password: app } ] }
-  SYS { users: [ { user: sys, password: sys } ] }
-}
-system_account: SYS
-authorization {
-  timeout: 5s
-  auth_callout { issuer: %q, account: APP, auth_users: [ app, sys ] }
-}
-`, filepath.Join(dir, "js"), pub)
+%s
+`, filepath.Join(dir, "js"), accounts)
 	confFile := filepath.Join(dir, "nats.conf")
 	if err := os.WriteFile(confFile, []byte(conf), 0o600); err != nil {
 		log.Fatal(err)
@@ -74,7 +71,7 @@ authorization {
 	}
 	rt, err := jetcast.NewServer(nc, jetcast.ServerOptions{
 		Config:        jetcast.Config{Ephemeral: []string{"typing.>"}},
-		Account:       "APP",
+		Account:       "CLIENT",
 		CalloutSigner: issuer,
 		Admin:         embedded.Admin(ns),
 		ManageStreams: true,

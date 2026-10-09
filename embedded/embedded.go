@@ -1,5 +1,6 @@
 // Package embedded adapts jetcast to a NATS server embedded in the same
-// process.
+// process: it renders the accounts jetcast needs and disconnects clients of
+// the embedded server.
 package embedded
 
 import (

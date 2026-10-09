@@ -327,7 +327,7 @@ func TestRegistryTTLMargin(t *testing.T) {
 	if _, err := js.UpdateStream(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
-	srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{Account: "APP", CalloutSigner: h.env.Issuer})
+	srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{Account: h.env.ClientAccount, CalloutSigner: h.env.Issuer})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ func Example() {
 	issuer, _ := nkeys.FromSeed([]byte("SA...")) // the auth_callout issuer's account seed
 
 	srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{
-		Account:       "APP",
+		Account:       "CLIENT", // the account the callout places clients in
 		CalloutSigner: issuer,
 		ManageStreams: true,
 	})
