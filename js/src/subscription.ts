@@ -293,7 +293,7 @@ export class Channel {
       resp = await conn.request<SubResponse>(
         conn.requestSubject("sub"),
         { channel: this.key, sid, path },
-        { valid: () => this.gen === gen },
+        { ready: () => this.gen === gen },
       );
     } catch {
       failed = true;

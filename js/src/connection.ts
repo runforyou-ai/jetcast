@@ -22,8 +22,8 @@ export interface RequestOptions {
   timeout?: number;
   /** Served before other waiting requests. */
   urgent?: boolean;
-  /** Checked once a slot is free; the request is not sent when it returns false. */
-  valid?: () => boolean;
+  /** Called once a slot is free, just before sending; the request is not sent when it returns false. */
+  ready?: () => boolean;
 }
 
 /** Requests in flight when hello does not state the server's limit. */
@@ -119,14 +119,14 @@ export class Connection {
 
   /**
    * Sends a JSON request in a request slot and decodes the JSON response. The
-   * timeout starts once a slot is free. When `valid` reports false once the
-   * slot is free, the request is not sent.
+   * timeout starts once a slot is free. `ready` is called once the slot is
+   * free, just before sending; when it returns false, the request is not sent.
    */
   async request<T>(subject: string, body: unknown, opts: RequestOptions = {}): Promise<T> {
-    const { timeout = 10_000, urgent = false, valid } = opts;
+    const { timeout = 10_000, urgent = false, ready } = opts;
     await this.acquire(urgent);
     try {
-      if (valid && !valid()) throw new Error("jetcast: request no longer needed");
+      if (ready && !ready()) throw new Error("jetcast: request no longer needed");
       const m = await this.nc.request(subject, encodeJSON(body), { timeout });
       return m.json<T>();
     } finally {

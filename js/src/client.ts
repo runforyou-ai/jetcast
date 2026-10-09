@@ -462,12 +462,19 @@ export class Echo {
         conn.renewing.add(node);
         let resp: RenewResponse | undefined;
         let noResponders = false;
-        const sent = Date.now();
+        // The lease restarts when the renewal is sent, after waiting for a slot.
+        let sent = 0;
         try {
           resp = await conn.request<RenewResponse>(
             conn.nodeRequestSubject(node, "renew"),
             { sids: subs.map(([, sid]) => sid) },
-            { urgent: true },
+            {
+              urgent: true,
+              ready: () => {
+                sent = Date.now();
+                return true;
+              },
+            },
           );
         } catch (e) {
           noResponders = e instanceof NoRespondersError || (e instanceof RequestError && e.isNoResponders());

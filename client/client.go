@@ -157,14 +157,15 @@ func (c *connection) acquire(ctx context.Context, urgent bool) error {
 func (c *connection) release() { c.slots.release() }
 
 // request sends a JSON request in a request slot and decodes the JSON
-// response. The timeout starts once a slot is free. When valid is not nil
-// and reports false once the slot is free, the request is not sent.
-func (c *connection) request(ctx context.Context, subject string, req, resp any, urgent bool, valid func() bool) error {
+// response. The timeout starts once a slot is free. When ready is not nil, it
+// is called once the slot is free, just before sending; when it reports false,
+// the request is not sent.
+func (c *connection) request(ctx context.Context, subject string, req, resp any, urgent bool, ready func() bool) error {
 	if err := c.acquire(ctx, urgent); err != nil {
 		return err
 	}
 	defer c.release()
-	if valid != nil && !valid() {
+	if ready != nil && !ready() {
 		return errStale
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
@@ -709,8 +710,10 @@ func (c *Client) renew(conn *connection) {
 			continue
 		}
 		var resp jetcast.RenewResponse
-		sent := time.Now()
-		err := conn.request(c.ctx, c.sub.nodeRequest(conn.socket, node, "renew"), jetcast.RenewRequest{Sids: sids}, &resp, true, nil)
+		// The lease restarts when the renewal is sent, after waiting for a slot.
+		var sent time.Time
+		err := conn.request(c.ctx, c.sub.nodeRequest(conn.socket, node, "renew"), jetcast.RenewRequest{Sids: sids}, &resp, true,
+			func() bool { sent = time.Now(); return true })
 		conn.mu.Lock()
 		delete(conn.renewing, node)
 		conn.mu.Unlock()
