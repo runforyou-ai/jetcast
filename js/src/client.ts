@@ -46,8 +46,8 @@ export type Status = "connecting" | "connected" | "reconnecting" | "stopped";
 const defaultLogger: Logger = { warn: (m, ...a) => console.warn(m, ...a) };
 
 /**
- * Renewal periods without a successful renewal after which a node's relays
- * are rebuilt elsewhere. The node drops relays not renewed for more than three
+ * Renewal periods without a successful renewal after which a relay is
+ * rebuilt elsewhere. The node drops relays not renewed for more than three
  * periods, checking once per period.
  */
 const renewGrace = 4;
@@ -454,8 +454,6 @@ export class Echo {
       list.push([s, sid]);
       byNode.set(node, list);
     }
-    // A node without relays starts a fresh lease with its next relay.
-    for (const node of conn.renewedAt.keys()) if (!byNode.has(node)) conn.renewedAt.delete(node);
     await Promise.all(
       [...byNode].map(async ([node, subs]) => {
         // One renewal per node at a time; leases run while it waits, so it
@@ -464,6 +462,7 @@ export class Echo {
         conn.renewing.add(node);
         let resp: RenewResponse | undefined;
         let noResponders = false;
+        const sent = Date.now();
         try {
           resp = await conn.request<RenewResponse>(
             conn.nodeRequestSubject(node, "renew"),
@@ -480,17 +479,14 @@ export class Echo {
           // No responders means the node is gone, and denied that the
           // connection is no longer registered. Other failures, such as an
           // overloaded node, are retried by the next renewals until the node
-          // must have dropped the relays; then they are rebuilt elsewhere.
-          const now = Date.now();
-          const last = conn.renewedAt.get(node) ?? now;
-          conn.renewedAt.set(node, last);
-          const gone = noResponders || resp?.error?.code === CodeDenied || now - last > renewGrace * renewPeriod(conn);
-          if (!gone) return;
-          conn.renewedAt.delete(node);
-          for (const [s, sid] of subs) s.resubscribe(conn, sid);
+          // must have dropped a relay; then it is rebuilt elsewhere.
+          const gone = noResponders || resp?.error?.code === CodeDenied;
+          for (const [s, sid] of subs) {
+            if (gone || s.leaseExpired(sid, renewGrace * renewPeriod(conn))) s.resubscribe(conn, sid);
+          }
           return;
         }
-        conn.renewedAt.set(node, Date.now());
+        for (const [s, sid] of subs) s.leaseRenewed(sid, sent);
         const missing = new Set(resp.missing ?? []);
         for (const [s, sid] of subs) if (missing.has(sid)) s.resubscribe(conn, sid);
       }),

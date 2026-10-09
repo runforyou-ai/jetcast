@@ -68,7 +68,8 @@ type Subscription struct {
 	recovering  bool
 	buffer      []*nats.Msg
 	lastEventAt time.Time
-	failures    int // consecutive failed attempts, for backoff
+	failures    int       // consecutive failed attempts, for backoff
+	leaseAt     time.Time // last successful renewal or start of the relay
 
 	// Cursor.
 	hasCursor   bool
@@ -366,7 +367,7 @@ func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 	s.path, s.node, s.recoverable = resp.Path, resp.Node, resp.Recoverable
 	s.failures = 0
 	if resp.Path == jetcast.PathRelay {
-		conn.relayAt(resp.Node)
+		s.leaseAt = time.Now()
 	}
 	if !resp.Recoverable {
 		s.drainLocked()
@@ -651,6 +652,23 @@ func (s *Subscription) endLocked(reason string) {
 	s.gen++
 	s.teardownLocked()
 	s.setStateLocked(State{State: StateDenied, Reason: reason, Err: fmt.Errorf("jetcast: channel %s", reason)})
+}
+
+// leaseRenewed records a successful renewal of the relay with sid, sent at.
+func (s *Subscription) leaseRenewed(sid string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sid == sid && at.After(s.leaseAt) {
+		s.leaseAt = at
+	}
+}
+
+// leaseExpired reports whether the relay with sid has not been renewed for
+// longer than d, so its node must have dropped it.
+func (s *Subscription) leaseExpired(sid string, d time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sid == sid && time.Since(s.leaseAt) > d
 }
 
 // relayLease returns the node and sid of a relayed subscription on conn.

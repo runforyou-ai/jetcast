@@ -36,8 +36,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   30 seconds.
 - A failed relay renewal no longer rebuilds every relay of the node at once:
   no responders and `denied` do; other failures are retried, one renewal per
-  node at a time, and rebuild the relays after four renewal periods without a
-  successful renewal.
+  node at a time, and rebuild a relay after four renewal periods without a
+  successful renewal of it.
 - Closing a client ends its subscriptions in the `left` state.
 - Heads requests no longer run channel authorizers: only public, granted and
   relayed channels get heads; others are reported denied.

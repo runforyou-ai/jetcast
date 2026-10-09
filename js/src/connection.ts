@@ -34,8 +34,6 @@ export class Connection {
   hello: HelloResponse = {};
   /** When to switch to a fresh connection, in Unix milliseconds. */
   refreshAt = Number.POSITIVE_INFINITY;
-  /** Time of the last successful renewal, or of the first relay, per node. */
-  readonly renewedAt = new Map<string, number>();
   /** Nodes with a renewal pending. */
   readonly renewing = new Set<string>();
 

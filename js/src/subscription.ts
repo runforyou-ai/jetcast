@@ -104,6 +104,8 @@ export class Channel {
   private lastEventAt = 0;
   /** Consecutive failed attempts, for backoff. */
   private failures = 0;
+  /** Last successful renewal or start of the relay. */
+  private leaseAt = 0;
 
   // Cursor.
   private hasCursor = false;
@@ -323,9 +325,7 @@ export class Channel {
     this.node = resp.node ?? "";
     this.recoverable = resp.recoverable;
     this.failures = 0;
-    if (resp.path === PathRelay && this.node !== "" && !conn.renewedAt.has(this.node)) {
-      conn.renewedAt.set(this.node, Date.now());
-    }
+    if (resp.path === PathRelay) this.leaseAt = Date.now();
     if (!resp.recoverable) {
       this.setState({ state: "subscribed", recovered: false, reason: "ephemeral" });
       this.drain();
@@ -564,6 +564,16 @@ export class Channel {
     this.teardown();
     this.setState({ state: "denied", reason, error: new Error(`jetcast: channel ${this.key} ${reason}`) });
     this.host.forget(this);
+  }
+
+  /** Records a successful renewal of the relay with sid, sent at `at`. @internal */
+  leaseRenewed(sid: string, at: number): void {
+    if (this.sid === sid && at > this.leaseAt) this.leaseAt = at;
+  }
+
+  /** Reports whether the relay with sid was not renewed for longer than ms, so its node must have dropped it. @internal */
+  leaseExpired(sid: string, ms: number): boolean {
+    return this.sid === sid && Date.now() - this.leaseAt > ms;
   }
 
   /** Returns the node and sid of a relayed subscription on conn. @internal */

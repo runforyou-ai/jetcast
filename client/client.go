@@ -125,28 +125,17 @@ type connection struct {
 	done  chan struct{}
 	once  sync.Once
 
-	mu        sync.Mutex
-	renewedAt map[string]time.Time // last successful renewal or new relay per node
-	renewing  map[string]bool      // nodes with a renewal pending
+	mu       sync.Mutex
+	renewing map[string]bool // nodes with a renewal pending
 }
 
 // defaultMaxRequests applies when hello does not state the server's limit.
 const defaultMaxRequests = 8
 
 // renewGrace is the number of renewal periods without a successful renewal
-// after which a node's relays are rebuilt elsewhere. The node drops relays not
-// renewed for more than three periods, checking once per period.
+// after which a relay is rebuilt elsewhere. The node drops relays not renewed
+// for more than three periods, checking once per period.
 const renewGrace = 4
-
-// relayAt records that a relay was established on node, starting its lease
-// unless an earlier one is running.
-func (c *connection) relayAt(node string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.renewedAt[node]; !ok {
-		c.renewedAt[node] = time.Now()
-	}
-}
 
 // renewPeriod is the relay renewal period stated in hello.
 func (c *connection) renewPeriod() time.Duration {
@@ -439,7 +428,7 @@ func (c *Client) dial() (*connection, error) {
 		return nil, err
 	}
 	socket := newSocketID()
-	conn := &connection{socket: socket, done: make(chan struct{}), renewedAt: map[string]time.Time{}, renewing: map[string]bool{}}
+	conn := &connection{socket: socket, done: make(chan struct{}), renewing: map[string]bool{}}
 	base := []nats.Option{
 		nats.Name(socket),
 		nats.Token(token),
@@ -705,14 +694,6 @@ func (c *Client) renew(conn *connection) {
 			byNode[node] = append(byNode[node], s)
 		}
 	}
-	// A node without relays starts a fresh lease with its next relay.
-	conn.mu.Lock()
-	for node := range conn.renewedAt {
-		if _, ok := byNode[node]; !ok {
-			delete(conn.renewedAt, node)
-		}
-	}
-	conn.mu.Unlock()
 	for node, subs := range byNode {
 		sids := make([]string, len(subs))
 		for i, s := range subs {
@@ -728,6 +709,7 @@ func (c *Client) renew(conn *connection) {
 			continue
 		}
 		var resp jetcast.RenewResponse
+		sent := time.Now()
 		err := conn.request(c.ctx, c.sub.nodeRequest(conn.socket, node, "renew"), jetcast.RenewRequest{Sids: sids}, &resp, true, nil)
 		conn.mu.Lock()
 		delete(conn.renewing, node)
@@ -736,28 +718,18 @@ func (c *Client) renew(conn *connection) {
 			// No responders means the node is gone, and denied that the
 			// connection is no longer registered. Other failures, such as an
 			// overloaded node, are retried by the next renewals until the
-			// node must have dropped the relays; then they are rebuilt.
-			conn.mu.Lock()
-			last, ok := conn.renewedAt[node]
-			if !ok {
-				last, conn.renewedAt[node] = time.Now(), time.Now()
-			}
-			gone := errors.Is(err, nats.ErrNoResponders) || err == nil && resp.Error.Code == jetcast.CodeDenied ||
-				time.Since(last) > renewGrace*conn.renewPeriod()
-			if gone {
-				delete(conn.renewedAt, node)
-			}
-			conn.mu.Unlock()
-			if gone {
-				for i, s := range subs {
+			// node must have dropped a relay; then it is rebuilt.
+			gone := errors.Is(err, nats.ErrNoResponders) || err == nil && resp.Error.Code == jetcast.CodeDenied
+			for i, s := range subs {
+				if gone || s.leaseExpired(sids[i], renewGrace*conn.renewPeriod()) {
 					s.resubscribe(conn, sids[i])
 				}
 			}
 			continue
 		}
-		conn.mu.Lock()
-		conn.renewedAt[node] = time.Now()
-		conn.mu.Unlock()
+		for i, s := range subs {
+			s.leaseRenewed(sids[i], sent)
+		}
 		missing := map[string]bool{}
 		for _, sid := range resp.Missing {
 			missing[sid] = true

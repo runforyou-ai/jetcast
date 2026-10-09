@@ -121,9 +121,25 @@ func TestRenewalLeaseRestartsWithNewRelay(t *testing.T) {
 	a := h.client("alice:s1")
 	s := a.Private("orders.23")
 	ready(t, s)
+	// Renewals fail for a while, then the relay is replaced by a new one
+	// right away: its lease starts afresh.
+	app0, err := h.env.ConnectApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app0.Close()
+	resume0 := srv.PauseNodeRequests()
+	busy0, err := app0.Subscribe(fmt.Sprintf("jetcast.rq.*.n.%s.renew", srv.Node()), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"error":{"code":"overloaded"}}`))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = app0.Flush()
+	time.Sleep(1500 * time.Millisecond)
+	_ = busy0.Unsubscribe()
+	resume0()
 	s.Leave()
-	// Idle for more than four renewal periods, then relay again.
-	time.Sleep(2500 * time.Millisecond)
 	s = a.Private("orders.23")
 	c := collect(s)
 	ready(t, s)
