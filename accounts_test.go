@@ -2,11 +2,15 @@ package jetcast_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	"github.com/runforyou-ai/jetcast"
 	"github.com/runforyou-ai/jetcast/embedded"
 	"github.com/runforyou-ai/jetcast/internal/devenv"
@@ -95,13 +99,49 @@ func TestAccountsConfig(t *testing.T) {
 	if _, err := (embedded.Accounts{AppPassword: "x", Issuer: "A", Clients: "APP"}).Config(); err == nil {
 		t.Fatal("shared App and Clients accounts accepted")
 	}
-	conf, err := embedded.Accounts{Prefix: "rt", AppPassword: "x", Issuer: "A", XKey: "X", Limits: embedded.ClientLimits{MaxConnections: 10}}.Config()
+	if _, err := (embedded.Accounts{AppPassword: "x\ay", Issuer: "A"}).Config(); err == nil {
+		t.Fatal("control character in a password accepted")
+	}
+	issuer, _ := nkeys.CreateAccount()
+	pub, _ := issuer.PublicKey()
+	curve, _ := nkeys.CreateCurveKeys()
+	xkey, _ := curve.PublicKey()
+	conf, err := embedded.Accounts{
+		Prefix: "rt", App: "true", Clients: "123", System: "on",
+		AppPassword: `a"b\c$d`, SystemPassword: "s", Issuer: pub, XKey: xkey,
+		Limits: embedded.ClientLimits{MaxConnections: 10},
+	}.Config()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`stream: "rt.ev.>"`, `subject: "rt.rq.>"`, "max_connections: 10", "max_subscriptions: 1000", `xkey: "X"`} {
-		if !strings.Contains(conf, want) {
-			t.Fatalf("config lacks %q:\n%s", want, conf)
+	file := filepath.Join(t.TempDir(), "nats.conf")
+	if err := os.WriteFile(file, []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := server.ProcessConfigFile(file)
+	if err != nil {
+		t.Fatalf("NATS rejects the configuration: %v\n%s", err, conf)
+	}
+	if opts.SystemAccount != "on" || opts.AuthCallout == nil || opts.AuthCallout.Account != "true" || opts.AuthCallout.XKey != xkey {
+		t.Fatalf("parsed options: system %q, callout %+v", opts.SystemAccount, opts.AuthCallout)
+	}
+	var password string
+	for _, u := range opts.Users {
+		if u.Username == "app" {
+			password = u.Password
 		}
+	}
+	if password != `a"b\c$d` {
+		t.Fatalf("app password parsed as %q", password)
+	}
+	names := map[string]bool{}
+	for _, acc := range opts.Accounts {
+		names[acc.Name] = true
+	}
+	if !names["true"] || !names["123"] || !names["on"] {
+		t.Fatalf("accounts %v", names)
+	}
+	if !strings.Contains(conf, "max_connections: 10") || !strings.Contains(conf, "max_subscriptions: 1000") {
+		t.Fatalf("limits missing:\n%s", conf)
 	}
 }

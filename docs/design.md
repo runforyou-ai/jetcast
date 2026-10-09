@@ -13,7 +13,7 @@ jetcast 是一个通用的 Go 库加 TypeScript SDK，把服务端事件实时�
 - 授权由 NATS 服务端强制执行。
 - 借助 JetStream：频道事件短期留存，客户端能发现漏收并补齐；无法证明完整时明确告知应用。
 
-**非目标（第一期）**：长期消息存储与历史查询、presence、whisper、React hooks、模型广播约定、Go 反代组件与配置生成器（只提供示例）。
+**非目标（第一期）**：长期消息存储与历史查询、presence、whisper、React hooks、模型广播约定、Go 反代组件（只提供示例）。NATS 账号与 callout 配置由 `embedded.Accounts` 生成。
 
 ## 2. NATS 事实与对应决策（v2.15，已对照源码核实）
 
@@ -314,7 +314,7 @@ await echo.close()
 ## 15. 分期
 
 - **第一期**：本文全部内容。
-- **第二期**：presence、whisper、React hooks、与 jetq 衔接（排队广播、事务提交后广播）、模型广播约定、配置生成器与 Go 反代组件。
+- **第二期**：presence、whisper、React hooks、与 jetq 衔接（排队广播、事务提交后广播）、模型广播约定与 Go 反代组件。
 - **第三期**：按需查询历史、无 callout 模式、OpenTelemetry、多 stream 分片。
 
 ## 16. 验收用例

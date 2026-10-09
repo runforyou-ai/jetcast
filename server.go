@@ -112,9 +112,12 @@ func (l Limits) withDefaults() Limits {
 // ServerOptions configure a [Server].
 type ServerOptions struct {
 	Config Config
-	// Account is the NATS account clients are placed in. In server
-	// configuration mode it is the account name; the application's own
-	// connection must belong to it.
+	// Account is the NATS account the auth callout places clients in: in
+	// server configuration mode, its name. The application's own connection
+	// belongs to the account of the auth_callout block, which holds the event
+	// stream and the registry; a separate client account (see
+	// embedded.Accounts) exchanges jetcast's subjects with it and limits
+	// clients. Clients may also share the application's account.
 	Account string
 	// CalloutSigner signs the user JWTs and callout responses. It is the
 	// account key pair whose public key is the auth_callout issuer.

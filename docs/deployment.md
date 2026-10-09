@@ -47,6 +47,8 @@ accounts {
     imports: [ { stream: { account: CLIENT, subject: "jetcast.rq.>" } } ]  # requests
   }
   CLIENT {
+    # embedded.Accounts leaves max_connections unlimited unless set; size it
+    # for your deployment.
     limits: { max_connections: 50000, max_subscriptions: 1000, max_payload: 65536 }
     exports: [ { stream: "jetcast.rq.>", accounts: [ APP ] } ]
     imports: [
@@ -109,6 +111,10 @@ limited by the client account:
 
 A client uses one subscription per directly subscribed channel (public and granted
 channels) plus a few for its own subjects and recoveries; relayed channels use none.
+NATS rejects a subscription beyond `max_subscriptions` asynchronously, with an error on
+the connection and without closing it; the SDKs do not turn it into a denied channel, so
+such a channel stays subscribed without receiving events. Choose a limit well above what
+your application subscribes.
 jetcast adds per-connection limits on relayed channels and concurrent requests
 (`ServerOptions.Limits`).
 

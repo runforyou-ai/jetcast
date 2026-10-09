@@ -101,6 +101,9 @@ func Start(o Options) (*Env, error) {
 	}
 	e.ClientAccount = "CLIENT"
 	if o.SharedAccount {
+		if o.Limits != (embedded.ClientLimits{}) {
+			return nil, fmt.Errorf("devenv: Limits need a separate client account")
+		}
 		e.ClientAccount = "APP"
 		accounts = fmt.Sprintf(`
 accounts {

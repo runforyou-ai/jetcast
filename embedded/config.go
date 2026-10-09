@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Accounts describes the NATS accounts jetcast runs on: an application
@@ -97,6 +98,11 @@ func (a Accounts) Config() (string, error) {
 	if a.App == a.Clients || a.App == a.System || a.Clients == a.System {
 		return "", errors.New("embedded: App, Clients and System must be distinct accounts")
 	}
+	for _, v := range []string{a.AppUser, a.AppPassword, a.SystemUser, a.SystemPassword, a.Issuer, a.XKey} {
+		if strings.ContainsFunc(v, unicode.IsControl) {
+			return "", errors.New("embedded: credentials and keys must not contain control characters")
+		}
+	}
 	if !prefix(a.Prefix) {
 		return "", fmt.Errorf("embedded: invalid prefix %q", a.Prefix)
 	}
@@ -104,44 +110,49 @@ func (a Accounts) Config() (string, error) {
 	p := a.Prefix
 	var b strings.Builder
 	fmt.Fprintf(&b, "accounts {\n")
-	fmt.Fprintf(&b, "  %s {\n", a.App)
+	fmt.Fprintf(&b, "  %s {\n", q(a.App))
 	fmt.Fprintf(&b, "    jetstream: enabled\n")
-	fmt.Fprintf(&b, "    users: [ { user: %q, password: %q } ]\n", a.AppUser, a.AppPassword)
+	fmt.Fprintf(&b, "    users: [ { user: %s, password: %s } ]\n", q(a.AppUser), q(a.AppPassword))
 	fmt.Fprintf(&b, "    exports: [\n")
-	fmt.Fprintf(&b, "      { stream: %q, accounts: [ %s ] }\n", p+".ev.>", a.Clients)
-	fmt.Fprintf(&b, "      { stream: %q, accounts: [ %s ] }\n", p+".c.>", a.Clients)
+	fmt.Fprintf(&b, "      { stream: %s, accounts: [ %s ] }\n", q(p+".ev.>"), q(a.Clients))
+	fmt.Fprintf(&b, "      { stream: %s, accounts: [ %s ] }\n", q(p+".c.>"), q(a.Clients))
 	fmt.Fprintf(&b, "    ]\n")
-	fmt.Fprintf(&b, "    imports: [ { stream: { account: %s, subject: %q } } ]\n", a.Clients, p+".rq.>")
+	fmt.Fprintf(&b, "    imports: [ { stream: { account: %s, subject: %s } } ]\n", q(a.Clients), q(p+".rq.>"))
 	fmt.Fprintf(&b, "  }\n")
-	fmt.Fprintf(&b, "  %s {\n", a.Clients)
+	fmt.Fprintf(&b, "  %s {\n", q(a.Clients))
 	fmt.Fprintf(&b, "    limits: { max_connections: %d, max_subscriptions: %d, max_payload: %d }\n", maxConns, maxSubs, maxPayload)
-	fmt.Fprintf(&b, "    exports: [ { stream: %q, accounts: [ %s ] } ]\n", p+".rq.>", a.App)
+	fmt.Fprintf(&b, "    exports: [ { stream: %s, accounts: [ %s ] } ]\n", q(p+".rq.>"), q(a.App))
 	fmt.Fprintf(&b, "    imports: [\n")
-	fmt.Fprintf(&b, "      { stream: { account: %s, subject: %q } }\n", a.App, p+".ev.>")
-	fmt.Fprintf(&b, "      { stream: { account: %s, subject: %q } }\n", a.App, p+".c.>")
+	fmt.Fprintf(&b, "      { stream: { account: %s, subject: %s } }\n", q(a.App), q(p+".ev.>"))
+	fmt.Fprintf(&b, "      { stream: { account: %s, subject: %s } }\n", q(a.App), q(p+".c.>"))
 	fmt.Fprintf(&b, "    ]\n")
 	fmt.Fprintf(&b, "  }\n")
-	authUsers := fmt.Sprintf("%q", a.AppUser)
+	authUsers := q(a.AppUser)
 	if a.SystemPassword != "" {
-		fmt.Fprintf(&b, "  %s { users: [ { user: %q, password: %q } ] }\n", a.System, a.SystemUser, a.SystemPassword)
-		authUsers += fmt.Sprintf(", %q", a.SystemUser)
+		fmt.Fprintf(&b, "  %s { users: [ { user: %s, password: %s } ] }\n", q(a.System), q(a.SystemUser), q(a.SystemPassword))
+		authUsers += ", " + q(a.SystemUser)
 	} else {
-		fmt.Fprintf(&b, "  %s {}\n", a.System)
+		fmt.Fprintf(&b, "  %s {}\n", q(a.System))
 	}
 	fmt.Fprintf(&b, "}\n")
-	fmt.Fprintf(&b, "system_account: %s\n", a.System)
+	fmt.Fprintf(&b, "system_account: %s\n", q(a.System))
 	fmt.Fprintf(&b, "authorization {\n")
 	fmt.Fprintf(&b, "  timeout: %ds\n", a.AuthTimeout)
 	fmt.Fprintf(&b, "  auth_callout {\n")
-	fmt.Fprintf(&b, "    issuer: %q\n", a.Issuer)
-	fmt.Fprintf(&b, "    account: %s\n", a.App)
+	fmt.Fprintf(&b, "    issuer: %s\n", q(a.Issuer))
+	fmt.Fprintf(&b, "    account: %s\n", q(a.App))
 	fmt.Fprintf(&b, "    auth_users: [ %s ]\n", authUsers)
 	if a.XKey != "" {
-		fmt.Fprintf(&b, "    xkey: %q\n", a.XKey)
+		fmt.Fprintf(&b, "    xkey: %s\n", q(a.XKey))
 	}
 	fmt.Fprintf(&b, "  }\n")
 	fmt.Fprintf(&b, "}\n")
 	return b.String(), nil
+}
+
+// q quotes a configuration string.
+func q(v string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
 }
 
 // account reports whether name is a plain account name.
