@@ -33,6 +33,36 @@ func (s *Server) SuspendRelays(socket string) (resume func()) {
 	}
 }
 
+// PauseNodeRequests stops answering requests addressed to this node and
+// returns a function resuming them.
+func (s *Server) PauseNodeRequests() (resume func()) {
+	var sub *nats.Subscription
+	for _, x := range s.subs {
+		if x.Subject == s.sub.nodeRequests(s.node) {
+			sub = x
+		}
+	}
+	_ = sub.Unsubscribe()
+	_ = s.nc.Flush()
+	return func() {
+		next, err := s.nc.Subscribe(sub.Subject, func(m *nats.Msg) {
+			select {
+			case s.work <- m:
+			case <-s.ctx.Done():
+			}
+		})
+		if err != nil {
+			panic(err)
+		}
+		_ = s.nc.Flush()
+		for i, x := range s.subs {
+			if x == sub {
+				s.subs[i] = next
+			}
+		}
+	}
+}
+
 // DropRelays stops relaying to a socket without telling the client.
 func (s *Server) DropRelays(socket string) { s.SuspendRelays(socket) }
 

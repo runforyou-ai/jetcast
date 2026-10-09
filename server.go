@@ -76,7 +76,8 @@ type AuthorizeFunc func(ctx context.Context, u User, p Params) (bool, error)
 type Limits struct {
 	// RelaysPerConnection caps relayed channels per connection, 100 by default.
 	RelaysPerConnection int
-	// ConcurrentRequests caps in-flight requests per connection, 8 by default.
+	// ConcurrentRequests caps in-flight requests per connection, 8 by
+	// default. Clients learn it in hello and wait instead of exceeding it.
 	ConcurrentRequests int
 	// RelaysPerNode caps relayed subscriptions on the node, 100000 by default.
 	RelaysPerNode int
@@ -158,6 +159,9 @@ type Stats struct {
 	RelayedEvents     uint64
 	Recoveries        uint64
 	RecoveryFailures  uint64
+	// Overloaded counts requests answered overloaded because the
+	// connection or the node had too many requests in flight.
+	Overloaded uint64
 }
 
 // Server serves clients on one application node: it answers the NATS auth
@@ -198,6 +202,7 @@ type Server struct {
 	calloutAccepted, calloutRejected atomic.Uint64
 	calloutDropped, calloutNanos     atomic.Uint64
 	relayed, recoveries, recFailures atomic.Uint64
+	overloaded                       atomic.Uint64
 }
 
 type channelRoute struct {
@@ -375,6 +380,7 @@ func (s *Server) Start(ctx context.Context) error {
 		case s.work <- m:
 		default:
 			if socket, ok := s.validRequest(m); ok && socket != "" {
+				s.overloaded.Add(1)
 				s.respondError(m, CodeOverloaded, "server busy")
 			}
 		}
@@ -428,6 +434,7 @@ func (s *Server) Stats() Stats {
 		RelayedEvents:    s.relayed.Load(),
 		Recoveries:       s.recoveries.Load(),
 		RecoveryFailures: s.recFailures.Load(),
+		Overloaded:       s.overloaded.Load(),
 	}
 	if n := st.CalloutAccepted + st.CalloutRejected; n > 0 {
 		st.CalloutLatencyAvg = time.Duration(s.calloutNanos.Load() / n)

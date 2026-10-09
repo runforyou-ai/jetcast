@@ -49,6 +49,10 @@ export interface HelloResponse {
   renewMs?: number;
   node?: string;
   prefix?: string;
+  /** Jetcast-Origin value of events caused by this connection. */
+  origin?: string;
+  /** Requests the connection may have in flight. */
+  maxRequests?: number;
 }
 
 export interface SubRequest {

@@ -100,6 +100,7 @@ func (s *Server) handleRequest(m *nats.Msg) {
 	s.inflightMu.Lock()
 	if s.inflight[socket] >= s.opts.Limits.ConcurrentRequests {
 		s.inflightMu.Unlock()
+		s.overloaded.Add(1)
 		s.respondError(m, CodeOverloaded, "too many concurrent requests")
 		return
 	}
@@ -127,7 +128,7 @@ func (s *Server) handleRequest(m *nats.Msg) {
 	}
 	switch {
 	case op == opHello && !node:
-		s.handleHello(ctx, m, rec)
+		s.handleHello(ctx, m, socket, rec)
 	case op == opSub && !node:
 		s.handleSub(ctx, m, socket, rec)
 	case op == opHeads:
@@ -151,7 +152,7 @@ func userOf(rec *connRecord) User {
 	return u
 }
 
-func (s *Server) handleHello(ctx context.Context, m *nats.Msg, rec *connRecord) {
+func (s *Server) handleHello(ctx context.Context, m *nats.Msg, socket string, rec *connRecord) {
 	epoch, _, _, err := s.hist.state(ctx)
 	if err != nil {
 		s.respondError(m, CodeUnavailable, "stream unavailable")
@@ -160,7 +161,7 @@ func (s *Server) handleHello(ctx context.Context, m *nats.Msg, rec *connRecord) 
 	s.respond(m, HelloResponse{
 		User: rec.User, Info: rec.Info, Grants: rec.Grants, ExpiresAt: rec.ExpiresAt,
 		Epoch: epoch, MaxAgeMs: s.maxAge.Milliseconds(), RenewMs: s.opts.RenewInterval.Milliseconds(),
-		Node: s.node, Prefix: s.sub.p,
+		Node: s.node, Prefix: s.sub.p, Origin: originTag(socket), MaxRequests: s.opts.Limits.ConcurrentRequests,
 	})
 }
 

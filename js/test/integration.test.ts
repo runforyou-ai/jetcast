@@ -350,4 +350,25 @@ describe("close", () => {
     expect(echo.status).toBe("stopped");
     await expect(echo.channel(uniq("x")).ready()).rejects.toThrow(/closed/);
   });
+
+  it("fails ready of channels not yet subscribed", async () => {
+    const c = await open();
+    const name = `orders.${uniq("o")}`;
+    await control("/allow", { user: c.user, channel: name });
+    const ch = c.echo.private(name);
+    void c.echo.close();
+    await expect(ch.ready()).rejects.toThrow(/closed/);
+  });
+});
+
+describe("request limit", () => {
+  it("subscribes many channels at once without overloading the server", async () => {
+    const user = uniq("g");
+    await control("/grant", { user, patterns: [`${user}.>`] });
+    const before = (await control("/stats")).Overloaded as number;
+    const c = await open(user);
+    const channels = Array.from({ length: 40 }, (_, i) => c.echo.private(`${user}.n${i}`));
+    await Promise.all(channels.map((ch) => ch.ready()));
+    expect((await control("/stats")).Overloaded).toBe(before);
+  });
 });

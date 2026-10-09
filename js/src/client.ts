@@ -1,7 +1,7 @@
 // The jetcast client: connection lifecycle, control messages and periodic
 // checks. Mirrors client/client.go.
 
-import { wsconnect, type Msg } from "@nats-io/nats-core";
+import { NoRespondersError, RequestError, wsconnect, type Msg } from "@nats-io/nats-core";
 import { Connection, connNamespace } from "./connection.js";
 import { Header, type Control, type HeadsResponse, type HelloResponse, type RenewResponse } from "./protocol.js";
 import { Channel, type SubscriptionHost } from "./subscription.js";
@@ -45,6 +45,12 @@ export type Status = "connecting" | "connected" | "reconnecting" | "stopped";
 
 const defaultLogger: Logger = { warn: (m, ...a) => console.warn(m, ...a) };
 
+/**
+ * Consecutive failed renewals after which a node's relays are rebuilt
+ * elsewhere; the node drops relays not renewed for three periods.
+ */
+const renewAttempts = 3;
+
 /** Connects and resolves once the first connection is established. */
 export async function connect(opts: ConnectOptions): Promise<Echo> {
   const echo = new Echo(opts);
@@ -69,7 +75,12 @@ export class Echo {
   private statusValue: Status = "connecting";
   private statusFns: ((s: Status) => void)[] = [];
   private subs = new Map<string, Channel>();
-  private sockets = new Set<string>();
+  /**
+   * Jetcast-Origin values of this client's connections, for toOthers, with
+   * when each connection was replaced (0 for the current one). Events of
+   * replaced connections can arrive until they leave the retention window.
+   */
+  private origins = new Map<string, number>();
   private closed = false;
   private connecting = false;
   private readyD = deferred<void>();
@@ -97,7 +108,7 @@ export class Echo {
     this.readyD.promise.catch(() => {});
     this.host = {
       call: (f) => this.call(f),
-      ownSocket: (s) => this.sockets.has(s),
+      ownOrigin: (o) => this.origins.has(o),
       forget: (s) => {
         if (this.subs.get(s.key) === s) this.subs.delete(s.key);
       },
@@ -162,7 +173,10 @@ export class Echo {
     clearInterval(this.ticker);
     this.wake?.();
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisibility);
-    for (const s of this.subs.values()) s.sendLeave(conn);
+    for (const s of this.subs.values()) {
+      s.sendLeave(conn);
+      s.closeReady();
+    }
     if (conn && !conn.closed) {
       try {
         await conn.nc.flush();
@@ -328,7 +342,14 @@ export class Echo {
     }
     const old = this.conn;
     this.conn = conn;
-    this.sockets.add(conn.socket);
+    const now = Date.now();
+    if (old) this.origins.set(old.origin, now);
+    // Events caused by older connections can only arrive while retained.
+    const keep = (conn.hello.maxAgeMs ?? 0) + 60_000;
+    for (const [origin, replaced] of this.origins) {
+      if (replaced !== 0 && now - replaced > keep) this.origins.delete(origin);
+    }
+    this.origins.set(conn.origin, 0);
     this.setStatus("connected");
     this.readyD.resolve();
     for (const s of [...this.subs.values()]) s.resubscribe(conn);
@@ -424,19 +445,29 @@ export class Echo {
     await Promise.all(
       [...byNode].map(async ([node, subs]) => {
         let resp: RenewResponse | undefined;
+        let noResponders = false;
         try {
           resp = await conn.request<RenewResponse>(conn.nodeRequestSubject(node, "renew"), {
             sids: subs.map(([, sid]) => sid),
           });
-        } catch {
-          resp = undefined;
+        } catch (e) {
+          noResponders = e instanceof NoRespondersError || (e instanceof RequestError && e.isNoResponders());
         }
         if (this.conn !== conn) return;
         if (!resp || resp.error) {
-          // The node is gone or unreachable: rebuild its relays elsewhere.
+          // No responders means the node is gone. Other failures, such as an
+          // overloaded node, are retried by the next renewals until the node
+          // has dropped the relays; then they are rebuilt elsewhere.
+          const failures = (conn.renewFailures.get(node) ?? 0) + 1;
+          if (!noResponders && failures < renewAttempts) {
+            conn.renewFailures.set(node, failures);
+            return;
+          }
+          conn.renewFailures.delete(node);
           for (const [s, sid] of subs) s.resubscribe(conn, sid);
           return;
         }
+        conn.renewFailures.delete(node);
         const missing = new Set(resp.missing ?? []);
         for (const [s, sid] of subs) if (missing.has(sid)) s.resubscribe(conn, sid);
       }),

@@ -17,6 +17,8 @@
 package jetcast
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -157,6 +159,14 @@ func ValidateID(id string) error {
 		return fmt.Errorf("%w: %q", ErrInvalidID, id)
 	}
 	return nil
+}
+
+// originTag returns the Jetcast-Origin value of events caused by a socket: a
+// digest that the socket's client learns in hello and other clients cannot
+// turn back into the socket ID.
+func originTag(socket string) string {
+	sum := sha256.Sum256([]byte("jetcast-origin:" + socket))
+	return hex.EncodeToString(sum[:16])
 }
 
 // socketLength is the length of client-generated socket IDs.

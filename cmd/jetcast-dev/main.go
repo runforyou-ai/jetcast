@@ -223,6 +223,9 @@ func main() {
 		}
 		return srv.Disconnect(ctx, t)
 	})
+	handle("/stats", func(context.Context, map[string]any) (any, error) {
+		return srv.Stats(), nil
+	})
 	handle("/kick", func(_ context.Context, b map[string]any) (any, error) {
 		cz, err := env.Server.Connz(nil)
 		if err != nil {

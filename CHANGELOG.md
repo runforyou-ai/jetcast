@@ -19,6 +19,36 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking (wire):** events carry a digest of the origin socket ID in
+  `Jetcast-Origin`, and hello tells each connection its own (`origin`). Clients
+  before 0.2 do not recognize their own events from servers of this version;
+  upgrade the SDKs together with the server. This version's SDKs still
+  recognize raw socket IDs from older servers.
+- Hello states the server's concurrent request limit (`maxRequests`). The Go
+  client and the TypeScript SDK keep requests within it, queueing the rest, so
+  resubscribing many channels at once no longer meets `overloaded`.
+- Failed subscription attempts back off exponentially from one second up to
+  30 seconds.
+- A failed relay renewal no longer rebuilds every relay of the node at once:
+  only no responders does; other failures are retried and rebuild the relays
+  after three consecutive failures.
+
+### Added
+
+- `Stats.Overloaded` counts requests answered `overloaded`.
+
+### Fixed
+
+- `Subscription.Ready` (Go) and `ready()` (TypeScript) fail when the client is
+  closed before the channel was first subscribed.
+- The Go client's recovery checks the attempt generation before ending or
+  retrying a subscription, so a stale recovery no longer ends a newer attempt.
+- Clients forget origins of replaced connections once their events left the
+  retention window.
+- CI type-checks the TypeScript tests.
+
+### Changed
+
 - Heads requests no longer run channel authorizers: only public, granted and
   relayed channels get heads; others are reported denied.
 - Auth callouts are handled by a bounded pool of workers

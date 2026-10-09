@@ -68,6 +68,7 @@ type Subscription struct {
 	recovering  bool
 	buffer      []*nats.Msg
 	lastEventAt time.Time
+	failures    int // consecutive failed attempts, for backoff
 
 	// Cursor.
 	hasCursor   bool
@@ -193,6 +194,18 @@ func (s *Subscription) setStateLocked(st State) {
 	}
 }
 
+// closeReady fails Ready when the client closes before the subscription was
+// first established.
+func (s *Subscription) closeReady() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.readyDone {
+		s.readyDone = true
+		s.readyErr = ErrClosed
+		close(s.ready)
+	}
+}
+
 // teardownLocked drops the direct subscription and pending messages.
 func (s *Subscription) teardownLocked() {
 	if s.direct != nil {
@@ -252,10 +265,16 @@ func (s *Subscription) resubscribe(conn *connection, sid string) {
 	go s.attempt(conn, gen, newSid)
 }
 
-// retryLater schedules a new attempt after a failure.
+// retryLater schedules a new attempt after a failure, backing off
+// exponentially from one second up to 30 seconds while attempts keep failing.
 func (s *Subscription) retryLater(conn *connection, gen int) {
-	delay := time.Second + time.Duration(mrand.Int64N(int64(time.Second)))
-	time.AfterFunc(delay, func() {
+	s.mu.Lock()
+	n := min(s.failures, 5)
+	s.failures++
+	s.mu.Unlock()
+	base := time.Second << n
+	delay := base + time.Duration(mrand.Int64N(int64(base)))
+	time.AfterFunc(min(delay, 30*time.Second), func() {
 		s.mu.Lock()
 		stale := s.gen != gen
 		sid := s.sid
@@ -308,11 +327,9 @@ func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 	if stale {
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.c.ctx, 10*time.Second)
 	var resp jetcast.SubResponse
-	err := request(ctx, conn.nc, s.c.sub.request(conn.socket, "sub"),
+	err := conn.request(s.c.ctx, s.c.sub.request(conn.socket, "sub"),
 		jetcast.SubRequest{Channel: s.ch.String(), Sid: sid, Path: path}, &resp)
-	cancel()
 
 	s.mu.Lock()
 	if s.gen != gen {
@@ -340,6 +357,7 @@ func (s *Subscription) attempt(conn *connection, gen int, sid string) {
 		s.direct = nil
 	}
 	s.path, s.node, s.recoverable = resp.Path, resp.Node, resp.Recoverable
+	s.failures = 0
 	if !resp.Recoverable {
 		s.drainLocked()
 		s.setStateLocked(State{State: StateSubscribed, Recovered: false, Reason: jetcast.ReasonEphemeral})
@@ -427,7 +445,7 @@ func (s *Subscription) liveLocked(conn *connection, m *nats.Msg) {
 // client caused itself.
 func (s *Subscription) deliverLocked(m *nats.Msg, seq uint64) {
 	origin := m.Header.Get(jetcast.HeaderOrigin)
-	if origin != "" && s.c.ownSocket(origin) {
+	if origin != "" && s.c.ownOrigin(origin) {
 		return
 	}
 	ev := Event{
@@ -475,13 +493,13 @@ func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos,
 			s.mu.Unlock()
 			return
 		}
-		if err != nil || res.Error != nil {
+		if err == nil && res.Error != nil && res.Error.Code == jetcast.CodeDenied {
+			s.endLocked(jetcast.CtlDenied)
 			s.mu.Unlock()
-			if res.Error != nil && res.Error.Code == jetcast.CodeDenied {
-				s.removed(conn, "", jetcast.CtlDenied)
-				return
-			}
-			s.mu.Lock()
+			s.c.forget(s)
+			return
+		}
+		if err != nil || res.Error != nil {
 			s.recovering = false
 			s.mu.Unlock()
 			s.retryLater(conn, gen)
@@ -495,14 +513,13 @@ func (s *Subscription) recoverLoop(conn *connection, gen int, epoch string, pos,
 		if !completeBatch(msgs, res, pos) {
 			// Events of the batch were lost on the way: retry from the same
 			// position rather than skipping them.
-			s.mu.Unlock()
 			if broken++; broken > 3 {
-				s.mu.Lock()
 				s.recovering = false
 				s.mu.Unlock()
 				s.retryLater(conn, gen)
 				return
 			}
+			s.mu.Unlock()
 			continue
 		}
 		for _, m := range msgs {
@@ -569,6 +586,10 @@ func (s *Subscription) resetLocked(epoch string, position, head uint64, reason s
 // recoverBatch requests one recovery batch and collects its events.
 func (s *Subscription) recoverBatch(conn *connection, req jetcast.RecoverRequest) (jetcast.RecoverResult, []*nats.Msg, error) {
 	var res jetcast.RecoverResult
+	if err := conn.acquire(s.c.ctx); err != nil {
+		return res, nil, err
+	}
+	defer conn.release()
 	inbox := conn.nc.NewRespInbox()
 	ch := make(chan *nats.Msg, 4096)
 	sub, err := conn.nc.ChanSubscribe(inbox, ch)
@@ -606,11 +627,17 @@ func (s *Subscription) removed(conn *connection, sid, reason string) {
 		s.mu.Unlock()
 		return
 	}
+	s.endLocked(reason)
+	s.mu.Unlock()
+	s.c.forget(s)
+}
+
+// endLocked ends the current attempt for good after the server denied or
+// removed the subscription.
+func (s *Subscription) endLocked(reason string) {
 	s.gen++
 	s.teardownLocked()
 	s.setStateLocked(State{State: StateDenied, Reason: reason, Err: fmt.Errorf("jetcast: channel %s", reason)})
-	s.mu.Unlock()
-	s.c.forget(s)
 }
 
 // relayLease returns the node and sid of a relayed subscription on conn.
