@@ -233,10 +233,10 @@ func TestRegistrationAfterStart(t *testing.T) {
 func TestReauthorizationFailure(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
 	var failing atomic.Bool
-	var failures atomic.Int64
+	var firstFailure atomic.Int64
 	h.channel("flaky.{id}", func(context.Context, jetcast.User, jetcast.Params) (bool, error) {
 		if failing.Load() {
-			failures.Add(1)
+			firstFailure.CompareAndSwap(0, time.Now().UnixNano())
 			return false, errors.New("database unavailable")
 		}
 		return true, nil
@@ -250,8 +250,10 @@ func TestReauthorizationFailure(t *testing.T) {
 	// Failed reauthorizations keep the relay for a while, then remove it and
 	// make the client subscribe again instead of relaying indefinitely.
 	c.waitState(t, client.StateInterrupted)
-	if n := failures.Load(); n < 2 {
-		t.Fatalf("relay removed after %d failed reauthorization", n)
+	// The first failure is at least one renewal before the deadline, two
+	// intervals after the last successful authorization.
+	if kept := time.Since(time.Unix(0, firstFailure.Load())); kept < 300*time.Millisecond {
+		t.Fatalf("relay removed %v after the first failed reauthorization", kept)
 	}
 	waitFor(t, func() bool { return srv.Stats().Relays == 0 })
 	if st := s.State(); st == client.StateDenied {
@@ -280,8 +282,14 @@ func TestReauthorizationRotates(t *testing.T) {
 	srv := h.node(func(o *jetcast.ServerOptions) { o.ReauthorizeInterval = 3 * time.Second })
 	a := h.client("alice:s1")
 	const n = 60
+	var interrupted atomic.Int64
 	for i := range n {
-		ready(t, a.Private(fmt.Sprintf("rot.r%d", i)))
+		s := a.Private(fmt.Sprintf("rot.r%d", i)).OnState(func(st client.State) {
+			if st.State == client.StateInterrupted {
+				interrupted.Add(1)
+			}
+		})
+		ready(t, s)
 	}
 	failing.Store(true)
 	// Failing relays do not take every reauthorization slot: all of them
@@ -291,8 +299,8 @@ func TestReauthorizationRotates(t *testing.T) {
 		defer mu.Unlock()
 		return len(attempted) == n
 	})
-	if r := srv.Stats().Relays; r != n {
-		t.Fatalf("%d relays left before the reauthorization deadline", r)
+	if r, i := srv.Stats().Relays, interrupted.Load(); r != n || i != 0 {
+		t.Fatalf("%d relays left and %d interrupted before the reauthorization deadline", r, i)
 	}
 }
 
@@ -328,4 +336,32 @@ func TestRegistryTTLMargin(t *testing.T) {
 		t.Fatalf("Start with a registry TTL equal to MaxConnectionTTL: %v", err)
 	}
 	_ = srv.Close()
+}
+
+func TestReauthorizationDeadlineAfterSlowCallback(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	var failing atomic.Bool
+	var started atomic.Int64
+	h.channel("slowfail.{id}", func(ctx context.Context, _ jetcast.User, _ jetcast.Params) (bool, error) {
+		if !failing.Load() {
+			return true, nil
+		}
+		started.CompareAndSwap(0, time.Now().UnixNano())
+		select {
+		case <-time.After(1200 * time.Millisecond):
+		case <-ctx.Done():
+		}
+		return false, errors.New("database unavailable")
+	})
+	h.node(func(o *jetcast.ServerOptions) { o.ReauthorizeInterval = time.Second })
+	a := h.client("alice:s1")
+	s := a.Private("slowfail.1")
+	c := collect(s)
+	ready(t, s)
+	failing.Store(true)
+	c.waitState(t, client.StateInterrupted)
+	// The first callback ends past the deadline, so that renewal removes it.
+	if d := time.Since(time.Unix(0, started.Load())); d > 1800*time.Millisecond {
+		t.Fatalf("relay removed %v after a reauthorization that ended past the deadline", d)
+	}
 }

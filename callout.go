@@ -56,7 +56,7 @@ func (s *Server) calloutWorker() {
 			return
 		case r := <-s.callouts:
 			// Close does not start queued requests.
-			if s.ctx.Err() != nil {
+			if s.closed.Load() || s.ctx.Err() != nil {
 				return
 			}
 			// The time budget of a request starts when it arrives; the NATS

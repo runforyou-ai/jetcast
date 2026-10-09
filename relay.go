@@ -244,6 +244,8 @@ run:
 		})
 	}
 	wg.Wait()
+	// Deadlines are checked against the time the callbacks finished.
+	done := time.Now()
 	for _, d := range reauth {
 		e := d.e
 		ctl := ""
@@ -258,7 +260,7 @@ run:
 			e.authorized = now
 		case d.tried && d.err == nil:
 			ctl = CtlDenied
-		case e.authorized.Equal(d.authorized) && now.Sub(d.authorized) >= 2*r.s.opts.ReauthorizeInterval:
+		case e.authorized.Equal(d.authorized) && done.Sub(d.authorized) >= 2*r.s.opts.ReauthorizeInterval:
 			ctl = CtlInterrupted
 		}
 		if ctl != "" {
