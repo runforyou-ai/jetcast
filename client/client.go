@@ -13,6 +13,8 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -470,6 +472,11 @@ func (c *Client) dial() (*connection, error) {
 		return fail(fmt.Errorf("jetcast: hello: %s", hello.Error.Code))
 	}
 	conn.hello = hello
+	if conn.hello.Origin == "" {
+		// Servers before 0.2 do not state it; newer ones may still publish.
+		sum := sha256.Sum256([]byte("jetcast-origin:" + socket))
+		conn.hello.Origin = hex.EncodeToString(sum[:16])
+	}
 	conn.slots = newSlots(cmp.Or(max(hello.MaxRequests, 0), defaultMaxRequests))
 	exp := time.UnixMilli(hello.ExpiresAt)
 	lead := max(time.Until(exp)/10, 30*time.Second)
@@ -492,15 +499,9 @@ func (c *Client) adopt(conn *connection) {
 	// still publish during a rolling upgrade, carry the socket ID itself.
 	now := time.Now()
 	if old != nil {
-		c.origins[old.socket] = now
-		if old.hello.Origin != "" {
-			c.origins[old.hello.Origin] = now
-		}
+		c.origins[old.socket], c.origins[old.hello.Origin] = now, now
 	}
-	c.origins[conn.socket] = time.Time{}
-	if conn.hello.Origin != "" {
-		c.origins[conn.hello.Origin] = time.Time{}
-	}
+	c.origins[conn.socket], c.origins[conn.hello.Origin] = time.Time{}, time.Time{}
 	subs := make([]*Subscription, 0, len(c.subs))
 	for _, s := range c.subs {
 		subs = append(subs, s)
@@ -704,6 +705,14 @@ func (c *Client) renew(conn *connection) {
 			byNode[node] = append(byNode[node], s)
 		}
 	}
+	// A node without relays starts a fresh lease with its next relay.
+	conn.mu.Lock()
+	for node := range conn.renewedAt {
+		if _, ok := byNode[node]; !ok {
+			delete(conn.renewedAt, node)
+		}
+	}
+	conn.mu.Unlock()
 	for node, subs := range byNode {
 		sids := make([]string, len(subs))
 		for i, s := range subs {

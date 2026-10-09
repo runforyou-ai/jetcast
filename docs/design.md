@@ -92,7 +92,7 @@ callout 请求进入节点内的队列（容量为 worker 数的 4 倍），由�
 
 ### 4.4 hello 与过期刷新
 
-连接后 SDK 发 `hello`，回复包含本连接的 `Info`、授予模式、过期时间、stream epoch 与留存配置，以及本连接的来源标记 `origin`（见第 8 节 toOthers）与并发请求上限 `maxRequests`。SDK 在每个连接上同时最多发出 `maxRequests` 个等待回复的请求（`sub`、`heads`、`recover`、`renew`），其余排队等候名额，名额就绪后才开始计算请求超时；连接建立后的整批重新订阅因此不会被回复 `overloaded`。订阅失败后的重试从 1 秒开始按指数退避，最长 30 秒，成功后复位。
+连接后 SDK 发 `hello`，回复包含本连接的 `Info`、授予模式、过期时间、stream epoch 与留存配置，以及本连接的来源标记 `origin`（见第 8 节 toOthers）与并发请求上限 `maxRequests`。SDK 在每个连接上同时最多发出 `maxRequests` 个等待回复的请求（`sub`、`heads`、`recover`、`renew`），其余排队等候名额，续约排在其他请求之前，订阅尝试被替换后其排队中的请求不再发送，名额就绪后才开始计算请求超时；连接建立后的整批重新订阅因此不会被回复 `overloaded`。订阅失败后的重试从 1 秒开始按指数退避，最长 30 秒，成功后复位。
 
 - SDK 在过期前（剩余 10%，至少 30 秒）调用 `getToken()`，新建连接（新 socket）并切换，旧连接在切换完成后关闭。页面从后台恢复时立即检查。
 - `getToken()` 抛出 `UnauthorizedError` 时进入 `stopped`；其他错误带抖动退避重试。
@@ -215,7 +215,7 @@ res, err := pub.Broadcast(ctx, jetcast.Event{
 - 事件类型也可以实现 `BroadcastOn() []Channel`，可选 `BroadcastAs()`、`BroadcastWith()`、`BroadcastWhen()`。
 - 每个频道一次 JetStream 发布，`Nats-Msg-Id` 为 `<事件 ID>:<pub|prv>:<频道>`，去重窗口内重试不会重复。多频道广播不是原子的，结果逐频道列出成功与失败。
 - 消息头只由库设置；应用数据不能覆盖 `Jetcast-*`、`Nats-*` 头。事件大小不能超过连接的 `max_payload` 减去头部开销，超出时 `Broadcast` 直接返回错误。
-- **toOthers**：照常投递，SDK 推进游标但不触发来源连接的回调。事件的 `Jetcast-Origin` 是 socket id 的摘要（SHA-256 截断），由 hello 告知本连接，其他订阅者无法从事件得知别的连接的 socket id；SDK 同时记住本连接的摘要与原始 socket id（旧版本服务端发布的事件带原始 id），并在被替换连接的事件离开留存窗口后忘掉它们。来源 socket id 由客户端在 `X-Socket-ID` 中自报，库不校验它属于发起请求的用户：伪造者最多让持有该 socket 的连接错过一次本应收到的回调，所以 toOthers 只用于省去发起者的重复更新，不是安全或保密手段。
+- **toOthers**：照常投递，SDK 推进游标但不触发来源连接的回调。事件的 `Jetcast-Origin` 是 socket id 的摘要（SHA-256 截断），由 hello 告知本连接，其他订阅者无法从事件得知别的连接的 socket id；SDK 同时记住本连接的摘要与原始 socket id（旧版本服务端发布的事件带原始 id；hello 来自旧版本服务端时 SDK 自行计算摘要），并在被替换连接的事件离开留存窗口后忘掉它们。来源 socket id 由客户端在 `X-Socket-ID` 中自报，库不校验它属于发起请求的用户：伪造者最多让持有该 socket 的连接错过一次本应收到的回调，所以 toOthers 只用于省去发起者的重复更新，不是安全或保密手段。
 
 ## 9. 撤销与连接管理
 

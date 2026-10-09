@@ -1,7 +1,19 @@
 import { headers, type Msg } from "@nats-io/nats-core";
 import { completeBatch } from "../src/subscription.js";
 import { describe, expect, it } from "vitest";
-import { channelNameError, decodePayload, header, isSocketId, matchPattern, newSocketId, parseSeq, parseTime } from "../src/util.js";
+import { createHash } from "node:crypto";
+import {
+  channelNameError,
+  decodePayload,
+  header,
+  isSocketId,
+  matchPattern,
+  newSocketId,
+  originTag,
+  parseSeq,
+  parseTime,
+  sha256,
+} from "../src/util.js";
 
 describe("newSocketId", () => {
   it("returns 22 base62 characters", () => {
@@ -104,4 +116,17 @@ describe("completeBatch", () => {
   it("rejects a hole", () => expect(completeBatch([full[0], full[2]], 2, 10)).toBe(false));
   it("rejects a wrong start", () => expect(completeBatch(full, 3, 9)).toBe(false));
   it("accepts an empty batch", () => expect(completeBatch([], 0, 10)).toBe(true));
+});
+
+describe("origin tags", () => {
+  it("computes SHA-256 like node:crypto", () => {
+    for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 120, 1000]) {
+      const data = new Uint8Array(n).map((_, i) => (i * 31 + 7) & 0xff);
+      expect(Buffer.from(sha256(data)).toString("hex")).toBe(createHash("sha256").update(data).digest("hex"));
+    }
+  });
+
+  it("matches the server's tag", () => {
+    expect(originTag("AAAAAAAAAAAAAAAAAAAAAA")).toBe("e1be5f72a3a8ecbfff6a754bae6ae8d5");
+  });
 });

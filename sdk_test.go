@@ -52,7 +52,7 @@ func TestClientStaysWithinRequestLimit(t *testing.T) {
 
 func TestFailedRenewalsKeepRelays(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
-	srv := h.node()
+	srv := h.node(func(o *jetcast.ServerOptions) { o.RenewInterval = time.Second })
 	h.allow("alice", "orders.21")
 	a := h.client("alice:s1")
 	s := a.Private("orders.21")
@@ -84,9 +84,9 @@ func TestFailedRenewalsKeepRelays(t *testing.T) {
 	stop := answer(jetcast.CodeOverloaded)
 	start := time.Now()
 	c.waitState(t, client.StateInterrupted)
-	// Renewals run every 500ms; the node drops relays after more than three
-	// periods, so four periods must pass first.
-	if d := time.Since(start); d < 1700*time.Millisecond {
+	// Renewals run every second and the last success was at most one period
+	// before start; four periods must pass since it.
+	if d := time.Since(start); d < 3200*time.Millisecond {
 		t.Fatalf("relay rebuilt %v after renewals started failing", d)
 	}
 	stop()
@@ -98,7 +98,7 @@ func TestFailedRenewalsKeepRelays(t *testing.T) {
 	stop = answer(jetcast.CodeDenied)
 	start = time.Now()
 	c.waitState(t, client.StateInterrupted)
-	if d := time.Since(start); d > 1500*time.Millisecond {
+	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Fatalf("relay of a denied renewal rebuilt after %v", d)
 	}
 	stop()
@@ -109,8 +109,44 @@ func TestFailedRenewalsKeepRelays(t *testing.T) {
 	defer resume()
 	start = time.Now()
 	c.waitState(t, client.StateInterrupted)
-	if d := time.Since(start); d > 1500*time.Millisecond {
+	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Fatalf("relay of a node without responders rebuilt after %v", d)
+	}
+}
+
+func TestRenewalLeaseRestartsWithNewRelay(t *testing.T) {
+	h := newHarness(t, jetcast.Config{})
+	srv := h.node()
+	h.allow("alice", "orders.23")
+	a := h.client("alice:s1")
+	s := a.Private("orders.23")
+	ready(t, s)
+	s.Leave()
+	// Idle for more than four renewal periods, then relay again.
+	time.Sleep(2500 * time.Millisecond)
+	s = a.Private("orders.23")
+	c := collect(s)
+	ready(t, s)
+	c.waitState(t, client.StateSubscribed)
+	app, err := h.env.ConnectApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	resume := srv.PauseNodeRequests()
+	defer resume()
+	busy, err := app.Subscribe(fmt.Sprintf("jetcast.rq.*.n.%s.renew", srv.Node()), func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"error":{"code":"overloaded"}}`))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Unsubscribe() }()
+	_ = app.Flush()
+	select {
+	case st := <-c.states:
+		t.Fatalf("state %s soon after renewals started failing on a new relay", st.State)
+	case <-time.After(1200 * time.Millisecond):
 	}
 }
 

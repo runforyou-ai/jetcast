@@ -353,10 +353,10 @@ export class Echo {
     const now = Date.now();
     if (old) {
       this.origins.set(old.socket, now);
-      if (old.hello.origin) this.origins.set(old.hello.origin, now);
+      this.origins.set(old.origin, now);
     }
     this.origins.set(conn.socket, 0);
-    if (conn.hello.origin) this.origins.set(conn.hello.origin, 0);
+    this.origins.set(conn.origin, 0);
     this.setStatus("connected");
     this.readyD.resolve();
     for (const s of [...this.subs.values()]) s.resubscribe(conn);
@@ -454,6 +454,8 @@ export class Echo {
       list.push([s, sid]);
       byNode.set(node, list);
     }
+    // A node without relays starts a fresh lease with its next relay.
+    for (const node of conn.renewedAt.keys()) if (!byNode.has(node)) conn.renewedAt.delete(node);
     await Promise.all(
       [...byNode].map(async ([node, subs]) => {
         // One renewal per node at a time; leases run while it waits, so it

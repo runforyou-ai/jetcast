@@ -2,6 +2,7 @@
 
 import { createInbox, type NatsConnection } from "@nats-io/nats-core";
 import type { HelloResponse } from "./protocol.js";
+import { originTag } from "./util.js";
 
 const encoder = new TextEncoder();
 
@@ -54,6 +55,11 @@ export class Connection {
       const err = new Error("jetcast: connection closed");
       for (const w of [...this.urgent.splice(0), ...this.normal.splice(0)]) w.reject(err);
     });
+  }
+
+  /** Jetcast-Origin value of events caused by this connection; servers before 0.2 do not state it in hello. */
+  get origin(): string {
+    return this.hello.origin || originTag(this.socket);
   }
 
   /**
