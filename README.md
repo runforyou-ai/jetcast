@@ -153,7 +153,9 @@ Details: [design](docs/design.md) (Chinese) and [deployment](docs/deployment.md)
   If `Disconnect` returns an error, the application must retry it to complete
   enforcement; retries include already-revoked connections. Persist the retry
   intent when enforcement must survive an application restart.
-- `toOthers` suppresses the sender's listeners; it is not a confidentiality mechanism.
+- `toOthers` suppresses the sender's listeners; it is not a security mechanism. The
+  socket ID is reported by the client and not verified, and events carry only a digest
+  of it, so other subscribers cannot learn socket IDs.
 
 ## Roadmap
 

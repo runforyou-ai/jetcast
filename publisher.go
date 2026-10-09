@@ -27,7 +27,11 @@ type Event struct {
 	Data any
 	// Origin is the socket ID of the client that caused the event. Clients
 	// with that socket receive the event without invoking their listeners,
-	// like Laravel's toOthers.
+	// like Laravel's toOthers. Events carry a digest of it, so subscribers do
+	// not learn other connections' socket IDs. The socket ID comes from the
+	// client, typically the X-Socket-ID header, and is not verified: toOthers
+	// only spares the sender a redundant update and is not a security
+	// mechanism.
 	Origin string
 }
 
@@ -164,7 +168,7 @@ func (p *Publisher) Broadcast(ctx context.Context, ev Event) (BroadcastResult, e
 		msg.Header.Set(HeaderEvent, ev.Name)
 		msg.Header.Set(HeaderID, ev.ID)
 		if ev.Origin != "" {
-			msg.Header.Set(HeaderOrigin, ev.Origin)
+			msg.Header.Set(HeaderOrigin, originTag(ev.Origin))
 		}
 		if p.cfg.ephemeral(c.Name) {
 			msg.Subject = p.sub.ev(c)

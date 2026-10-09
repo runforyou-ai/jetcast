@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { Connection } from "../src/connection.js";
 import { connect, UnauthorizedError, type Echo } from "../src/index.js";
 import { broadcast, client, control, maxAgeMs, Recorder, uniq, waitFor, wsUrl, type TestClient } from "./helpers.js";
 
@@ -153,6 +154,25 @@ describe("private channels", () => {
     await broadcast("order.shipped", [`prv.${name}`], 4);
     await waitFor(() => rec.events.length === 4, "event after renewals");
     expect(ch.state).toBe("subscribed");
+  });
+
+  it("restarts a queued renewal's lease when it is sent", async () => {
+    const c = await open();
+    const name = `orders.${uniq("o")}`;
+    await control("/allow", { user: c.user, channel: name });
+    const ch = c.echo.private(name);
+    await ch.ready();
+    expect(pathOf(ch)).toBe("relay");
+    // Every request slot is taken; the next renewal waits for one.
+    const conn = (c.echo as unknown as { conn: Connection }).conn;
+    const max = conn.hello.maxRequests && conn.hello.maxRequests > 0 ? conn.hello.maxRequests : 8;
+    for (let i = 0; i < max; i++) await conn.acquire();
+    await waitFor(() => (conn as unknown as { urgent: unknown[] }).urgent.length > 0, "queued renewal");
+    await new Promise((r) => setTimeout(r, 300));
+    const released = Date.now();
+    for (let i = 0; i < max; i++) conn.release();
+    await waitFor(() => conn.renewing.size === 0, "renewal sent");
+    expect((ch as unknown as { leaseAt: number }).leaseAt).toBeGreaterThanOrEqual(released);
   });
 
   it("rejects channels the authorizer denies", async () => {
@@ -349,5 +369,27 @@ describe("close", () => {
     await echo.close();
     expect(echo.status).toBe("stopped");
     await expect(echo.channel(uniq("x")).ready()).rejects.toThrow(/closed/);
+  });
+
+  it("fails ready of channels not yet subscribed", async () => {
+    const c = await open();
+    const name = `orders.${uniq("o")}`;
+    await control("/allow", { user: c.user, channel: name });
+    const ch = c.echo.private(name);
+    void c.echo.close();
+    await expect(ch.ready()).rejects.toThrow(/closed/);
+    expect(ch.state).toBe("left");
+  });
+});
+
+describe("request limit", () => {
+  it("subscribes many channels at once without overloading the server", async () => {
+    const user = uniq("g");
+    await control("/grant", { user, patterns: [`${user}.>`] });
+    const before = (await control("/stats")).Overloaded as number;
+    const c = await open(user);
+    const channels = Array.from({ length: 40 }, (_, i) => c.echo.private(`${user}.n${i}`));
+    await Promise.all(channels.map((ch) => ch.ready()));
+    expect((await control("/stats")).Overloaded).toBe(before);
   });
 });

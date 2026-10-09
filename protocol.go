@@ -77,6 +77,11 @@ type HelloResponse struct {
 	RenewMs   int64           `json:"renewMs,omitempty"`
 	Node      string          `json:"node,omitempty"`
 	Prefix    string          `json:"prefix,omitempty"`
+	// Origin is the Jetcast-Origin value of events caused by this connection.
+	Origin string `json:"origin,omitempty"`
+	// MaxRequests is the number of requests a connection may have in flight;
+	// clients wait for a slot instead of exceeding it.
+	MaxRequests int `json:"maxRequests,omitempty"`
 }
 
 // SubRequest subscribes to a channel.

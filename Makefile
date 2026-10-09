@@ -11,4 +11,4 @@ tidy:
 	go mod tidy
 
 js-test:
-	cd js && npm ci && npm run build && npm test
+	cd js && npm ci && npm run typecheck && npm run build && npm test

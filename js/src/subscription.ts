@@ -63,8 +63,8 @@ export type Listener = (data: any, meta: EventMeta) => void;
 export interface SubscriptionHost {
   /** Queues an application callback; callbacks run one at a time in order. */
   call(f: () => void): void;
-  /** Reports whether socket is one this client used. */
-  ownSocket(socket: string): boolean;
+  /** Reports whether an event origin is one of this client's connections. */
+  ownOrigin(origin: string): boolean;
   /** Removes a subscription from the client. */
   forget(s: Channel): void;
   /** Returns the current connection. */
@@ -102,6 +102,10 @@ export class Channel {
   private recovering = false;
   private buffer: Msg[] = [];
   private lastEventAt = 0;
+  /** Consecutive failed attempts, for backoff. */
+  private failures = 0;
+  /** Last successful renewal or start of the relay. */
+  private leaseAt = 0;
 
   // Cursor.
   private hasCursor = false;
@@ -189,6 +193,13 @@ export class Channel {
     conn.notify(conn.nodeRequestSubject(this.node, "leave"), { sid: this.sid });
   }
 
+  /** Ends the channel when the client closes: it enters "left", and `ready()` rejects if it was never subscribed. @internal */
+  closed(): void {
+    this.gen++;
+    this.teardown();
+    this.setState({ state: "left", error: new Error("jetcast: client closed") });
+  }
+
   /** Fails the subscription before it starts. @internal */
   fail(error: Error): void {
     this.setState({ state: "denied", error });
@@ -236,11 +247,16 @@ export class Channel {
     void this.attempt(conn, gen, newSid);
   }
 
-  /** Schedules a new attempt after a failure. */
+  /** Schedules a new attempt after a failure, backing off exponentially from one second up to 30 seconds. */
   private retryLater(conn: Connection, gen: number): void {
-    setTimeout(() => {
-      if (this.gen === gen && this.host.current() === conn) this.resubscribe(conn, this.sid);
-    }, 1000 + randInt(1000));
+    const base = 1000 * 2 ** Math.min(this.failures, 5);
+    this.failures++;
+    setTimeout(
+      () => {
+        if (this.gen === gen && this.host.current() === conn) this.resubscribe(conn, this.sid);
+      },
+      Math.min(base + randInt(base), 30_000),
+    );
   }
 
   /** Subscribes on conn with the sid bound to generation gen: sets up delivery, then asks the server. */
@@ -274,7 +290,11 @@ export class Channel {
     let resp: SubResponse | undefined;
     let failed = false;
     try {
-      resp = await conn.request<SubResponse>(conn.requestSubject("sub"), { channel: this.key, sid, path });
+      resp = await conn.request<SubResponse>(
+        conn.requestSubject("sub"),
+        { channel: this.key, sid, path },
+        { ready: () => this.gen === gen },
+      );
     } catch {
       failed = true;
     }
@@ -304,6 +324,8 @@ export class Channel {
     this.path = resp.path ?? "";
     this.node = resp.node ?? "";
     this.recoverable = resp.recoverable;
+    this.failures = 0;
+    if (resp.path === PathRelay) this.leaseAt = Date.now();
     if (!resp.recoverable) {
       this.setState({ state: "subscribed", recovered: false, reason: "ephemeral" });
       this.drain();
@@ -381,7 +403,7 @@ export class Channel {
   /** Hands an event to the listeners, except for events this client caused itself. */
   private deliver(m: Msg, seq: number): void {
     const origin = header(m, Header.Origin);
-    if (origin !== "" && this.host.ownSocket(origin)) return;
+    if (origin !== "" && this.host.ownOrigin(origin)) return;
     const event = header(m, Header.Event);
     const meta: EventMeta = {
       event,
@@ -424,7 +446,7 @@ export class Channel {
       let res: RecoverResult | undefined;
       let msgs: Msg[] = [];
       try {
-        [res, msgs] = await this.recoverBatch(conn, req);
+        [res, msgs] = await this.recoverBatch(conn, gen, req);
       } catch {
         res = undefined;
       }
@@ -488,8 +510,19 @@ export class Channel {
     this.drain();
   }
 
-  /** Requests one recovery batch and collects its events until the done message. */
-  private recoverBatch(conn: Connection, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
+  /** Requests one recovery batch in a request slot and collects its events until the done message. */
+  private async recoverBatch(conn: Connection, gen: number, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
+    await conn.acquire();
+    try {
+      if (this.gen !== gen) throw new Error("jetcast: request no longer needed");
+      return await this.recoverInSlot(conn, req);
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** Sends one recovery request and collects its events until the done message. */
+  private async recoverInSlot(conn: Connection, req: RecoverRequest): Promise<[RecoverResult, Msg[]]> {
     const d = deferred<[RecoverResult, Msg[]]>();
     const msgs: Msg[] = [];
     const inbox = conn.newInbox();
@@ -515,11 +548,13 @@ export class Channel {
     } catch (e) {
       d.reject(e);
     }
-    return d.promise.finally(() => {
+    try {
+      return await d.promise;
+    } finally {
       clearTimeout(timer);
       offClose();
       sub.unsubscribe();
-    });
+    }
   }
 
   /** Ends the subscription after the server denied or removed it. @internal */
@@ -529,6 +564,16 @@ export class Channel {
     this.teardown();
     this.setState({ state: "denied", reason, error: new Error(`jetcast: channel ${this.key} ${reason}`) });
     this.host.forget(this);
+  }
+
+  /** Records a successful renewal of the relay with sid, sent at `at`. @internal */
+  leaseRenewed(sid: string, at: number): void {
+    if (this.sid === sid && at > this.leaseAt) this.leaseAt = at;
+  }
+
+  /** Reports whether the relay with sid was not renewed for longer than ms, so its node must have dropped it. @internal */
+  leaseExpired(sid: string, ms: number): boolean {
+    return this.sid === sid && Date.now() - this.leaseAt > ms;
   }
 
   /** Returns the node and sid of a relayed subscription on conn. @internal */

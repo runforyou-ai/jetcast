@@ -10,8 +10,11 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,12 +82,16 @@ type Client struct {
 	sub  subjectsOf
 	log  *slog.Logger
 
-	mu         sync.Mutex
-	conn       *connection
-	status     Status
-	statusFn   []func(Status)
-	subs       map[string]*Subscription
-	sockets    map[string]bool // every socket this client used, for toOthers
+	mu       sync.Mutex
+	conn     *connection
+	status   Status
+	statusFn []func(Status)
+	subs     map[string]*Subscription
+	// origins holds the Jetcast-Origin values of this client's connections,
+	// for toOthers, with the time each connection was replaced (zero for the
+	// current one). Events of replaced connections can arrive until they
+	// leave the retention window.
+	origins    map[string]time.Time
 	closed     bool
 	stopErr    error
 	connecting bool
@@ -113,7 +120,61 @@ type connection struct {
 	evSub     *nats.Subscription
 	ctlSub    *nats.Subscription
 	refreshAt time.Time
+	// slots bounds requests in flight to the server's limit.
+	slots *slots
+	done  chan struct{}
+	once  sync.Once
+
+	mu       sync.Mutex
+	renewing map[string]bool // nodes with a renewal pending
 }
+
+// defaultMaxRequests applies when hello does not state the server's limit.
+const defaultMaxRequests = 8
+
+// renewGrace is the number of renewal periods without a successful renewal
+// after which a relay is rebuilt elsewhere. The node drops relays not renewed
+// for more than three periods, checking once per period.
+const renewGrace = 4
+
+// renewPeriod is the relay renewal period stated in hello.
+func (c *connection) renewPeriod() time.Duration {
+	if c.hello.RenewMs <= 0 {
+		return 20 * time.Second
+	}
+	return time.Duration(c.hello.RenewMs) * time.Millisecond
+}
+
+// markClosed records that the connection is closed, releasing request waits.
+func (c *connection) markClosed() { c.once.Do(func() { close(c.done) }) }
+
+// acquire waits for a request slot until ctx ends or the connection closes;
+// urgent requests are served first.
+func (c *connection) acquire(ctx context.Context, urgent bool) error {
+	return c.slots.acquire(ctx, c.done, urgent)
+}
+
+func (c *connection) release() { c.slots.release() }
+
+// request sends a JSON request in a request slot and decodes the JSON
+// response. The timeout starts once a slot is free. When ready is not nil, it
+// is called once the slot is free, just before sending; when it reports false,
+// the request is not sent.
+func (c *connection) request(ctx context.Context, subject string, req, resp any, urgent bool, ready func() bool) error {
+	if err := c.acquire(ctx, urgent); err != nil {
+		return err
+	}
+	defer c.release()
+	if ready != nil && !ready() {
+		return errStale
+	}
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	return request(ctx, c.nc, subject, req, resp)
+}
+
+// requestTimeout bounds one request once it is sent.
+const requestTimeout = 10 * time.Second
 
 type subjectsOf struct{ p string }
 
@@ -157,7 +218,7 @@ func Connect(ctx context.Context, opts Options) (*Client, error) {
 		log:     opts.Logger,
 		status:  StatusConnecting,
 		subs:    map[string]*Subscription{},
-		sockets: map[string]bool{},
+		origins: map[string]time.Time{},
 		wake:    make(chan struct{}, 1),
 		ready:   make(chan struct{}),
 	}
@@ -237,6 +298,7 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 	for _, s := range subs {
 		s.sendLeave(conn)
+		s.closed()
 	}
 	if conn != nil {
 		conn.nc.Close()
@@ -367,7 +429,7 @@ func (c *Client) dial() (*connection, error) {
 		return nil, err
 	}
 	socket := newSocketID()
-	conn := &connection{socket: socket}
+	conn := &connection{socket: socket, done: make(chan struct{}), renewing: map[string]bool{}}
 	base := []nats.Option{
 		nats.Name(socket),
 		nats.Token(token),
@@ -383,6 +445,7 @@ func (c *Client) dial() (*connection, error) {
 	conn.nc = nc
 	fail := func(err error) (*connection, error) {
 		nc.Close()
+		conn.markClosed()
 		return nil, err
 	}
 	if conn.ctlSub, err = nc.Subscribe(c.sub.conn(socket)+".ctl", func(m *nats.Msg) { c.onControl(conn, m) }); err != nil {
@@ -399,6 +462,12 @@ func (c *Client) dial() (*connection, error) {
 		return fail(fmt.Errorf("jetcast: hello: %s", hello.Error.Code))
 	}
 	conn.hello = hello
+	if conn.hello.Origin == "" {
+		// Servers before 0.2 do not state it; newer ones may still publish.
+		sum := sha256.Sum256([]byte("jetcast-origin:" + socket))
+		conn.hello.Origin = hex.EncodeToString(sum[:16])
+	}
+	conn.slots = newSlots(cmp.Or(max(hello.MaxRequests, 0), defaultMaxRequests))
 	exp := time.UnixMilli(hello.ExpiresAt)
 	lead := max(time.Until(exp)/10, 30*time.Second)
 	conn.refreshAt = exp.Add(-lead)
@@ -416,7 +485,13 @@ func (c *Client) adopt(conn *connection) {
 	}
 	old := c.conn
 	c.conn = conn
-	c.sockets[conn.socket] = true
+	// Events carry the digest of their origin; servers before 0.2, which may
+	// still publish during a rolling upgrade, carry the socket ID itself.
+	now := time.Now()
+	if old != nil {
+		c.origins[old.socket], c.origins[old.hello.Origin] = now, now
+	}
+	c.origins[conn.socket], c.origins[conn.hello.Origin] = time.Time{}, time.Time{}
 	subs := make([]*Subscription, 0, len(c.subs))
 	for _, s := range c.subs {
 		subs = append(subs, s)
@@ -438,6 +513,7 @@ func (c *Client) adopt(conn *connection) {
 
 // lost handles the loss of a connection.
 func (c *Client) lost(conn *connection) {
+	conn.markClosed()
 	c.mu.Lock()
 	current := c.conn == conn
 	closed := c.closed
@@ -535,10 +611,26 @@ func (c *Client) forget(s *Subscription) {
 	}
 }
 
-func (c *Client) ownSocket(socket string) bool {
+// pruneOrigins forgets origins of connections replaced longer ago than the
+// retention window: their events can no longer arrive.
+func (c *Client) pruneOrigins(conn *connection) {
+	keep := time.Duration(conn.hello.MaxAgeMs)*time.Millisecond + time.Minute
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sockets[socket]
+	for origin, replaced := range c.origins {
+		if !replaced.IsZero() && time.Since(replaced) > keep {
+			delete(c.origins, origin)
+		}
+	}
+}
+
+// ownOrigin reports whether an event's origin is one of this client's
+// connections.
+func (c *Client) ownOrigin(origin string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.origins[origin]
+	return ok
 }
 
 // checkHeadsSoon schedules a heads check of every channel, at most every
@@ -568,10 +660,8 @@ func (c *Client) runTimers() {
 			if now.After(conn.refreshAt) {
 				c.startConnecting(true)
 			}
-			renew := time.Duration(conn.hello.RenewMs) * time.Millisecond
-			if renew <= 0 {
-				renew = 20 * time.Second
-			}
+			c.pruneOrigins(conn)
+			renew := conn.renewPeriod()
 			if now.Sub(lastRenew) >= renew-renew/10+time.Duration(mrand.Int64N(int64(renew/10)+1)) {
 				lastRenew = now
 				go c.renew(conn)
@@ -610,16 +700,38 @@ func (c *Client) renew(conn *connection) {
 		for i, s := range subs {
 			_, sids[i] = s.relayLease(conn)
 		}
-		ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+		// One renewal per node at a time; leases run while it waits, so it
+		// goes before other requests.
+		conn.mu.Lock()
+		busy := conn.renewing[node]
+		conn.renewing[node] = true
+		conn.mu.Unlock()
+		if busy {
+			continue
+		}
 		var resp jetcast.RenewResponse
-		err := request(ctx, conn.nc, c.sub.nodeRequest(conn.socket, node, "renew"), jetcast.RenewRequest{Sids: sids}, &resp)
-		cancel()
+		// The lease restarts when the renewal is sent, after waiting for a slot.
+		var sent time.Time
+		err := conn.request(c.ctx, c.sub.nodeRequest(conn.socket, node, "renew"), jetcast.RenewRequest{Sids: sids}, &resp, true,
+			func() bool { sent = time.Now(); return true })
+		conn.mu.Lock()
+		delete(conn.renewing, node)
+		conn.mu.Unlock()
 		if err != nil || resp.Error != nil {
-			// The node is gone or unreachable: rebuild its relays elsewhere.
+			// No responders means the node is gone, and denied that the
+			// connection is no longer registered. Other failures, such as an
+			// overloaded node, are retried by the next renewals until the
+			// node must have dropped a relay; then it is rebuilt.
+			gone := errors.Is(err, nats.ErrNoResponders) || err == nil && resp.Error.Code == jetcast.CodeDenied
 			for i, s := range subs {
-				s.resubscribe(conn, sids[i])
+				if gone || s.leaseExpired(sids[i], renewGrace*conn.renewPeriod()) {
+					s.resubscribe(conn, sids[i])
+				}
 			}
 			continue
+		}
+		for i, s := range subs {
+			s.leaseRenewed(sids[i], sent)
 		}
 		missing := map[string]bool{}
 		for _, sid := range resp.Missing {
@@ -662,10 +774,8 @@ func (c *Client) heads(conn *connection, idleSince time.Time) {
 		if node != "" {
 			subject = c.sub.nodeRequest(conn.socket, node, "heads")
 		}
-		ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 		var resp jetcast.HeadsResponse
-		err := request(ctx, conn.nc, subject, jetcast.HeadsRequest{Epoch: epoch, Channels: names}, &resp)
-		cancel()
+		err := conn.request(c.ctx, subject, jetcast.HeadsRequest{Epoch: epoch, Channels: names}, &resp, false, nil)
 		if err != nil || resp.Error != nil {
 			continue
 		}
