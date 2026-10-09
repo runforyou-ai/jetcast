@@ -59,7 +59,7 @@ echo.private("orders.42")
 - presence 频道（`here`、`joining`、`leaving`）与客户端事件（whisper）。
 - React hooks。
 - 借助 [jetq](https://github.com/runforyou-ai/jetq) 排队广播、事务提交后广播。
-- 历史查询、浏览器独立账号、无 callout 模式、OpenTelemetry。
+- 历史查询、无 callout 模式、OpenTelemetry。
 
 ## 许可证
 

@@ -6,6 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `embedded.Accounts` renders the NATS accounts and auth callout configuration:
+  an application account and a separate client account that exchanges only
+  jetcast's subjects with it and carries per-connection subscription and
+  payload limits (1000 subscriptions, 64 KiB by default) and an optional
+  account connection limit. Development servers, tests and examples place
+  clients in the `CLIENT` account.
+- Deployment documentation of the client account, its limits and encrypted
+  callouts (`CalloutXKey`).
+
 ### Changed
 
 - Heads requests no longer run channel authorizers: only public, granted and

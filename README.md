@@ -12,7 +12,8 @@ callbacks you write.
 
 - **Browsers on NATS, authorization enforced by NATS.** Clients authenticate through the
   NATS auth callout with your own tokens; every connection gets a JWT that allows exactly
-  its channels and its own namespace.
+  its channels and its own namespace. Clients live in their own NATS account, which limits
+  their connections, subscriptions and payloads.
 - **Laravel-style channels.** `srv.Channel("orders.{id}", authorize)` decides at subscribe
   time, like `routes/channels.php`. Stable, broad grants (a user's own feed, a team's
   channels) can be given at connect time instead, so NATS routes them without touching
@@ -41,7 +42,7 @@ npm install @runforyou/jetcast
 
 ```go
 srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{
-	Account:       "APP",        // the NATS account clients are placed in
+	Account:       "CLIENT",     // the NATS account the callout places clients in
 	CalloutSigner: issuerKey,    // account key pair configured as auth_callout issuer
 	Admin:         jetcast.SystemAdmin(sysConn), // optional: kick clients on Disconnect
 	ManageStreams: true,         // create the event stream and registry bucket
@@ -159,7 +160,7 @@ Details: [design](docs/design.md) (Chinese) and [deployment](docs/deployment.md)
 - Presence channels (`here`, `joining`, `leaving`) and client events (whisper).
 - React hooks.
 - Queued and after-commit broadcasting with [jetq](https://github.com/runforyou-ai/jetq).
-- History queries, a separate browser account, a mode without auth callout, OpenTelemetry.
+- History queries, a mode without auth callout, OpenTelemetry.
 
 ## License
 

@@ -8,14 +8,21 @@ HTTP edge. This page lists what NATS needs and how to expose its WebSocket liste
 jetcast needs nats-server 2.14.4 or later (2.15 recommended) with:
 
 - **JetStream** enabled for the application account.
-- **An account for clients and the application**, here `APP`. The application connects
-  with a user that bypasses the callout; browsers are placed in the same account by the
-  callout, with permissions limited to their own subjects.
+- **An application account**, here `APP`, holding the event stream, the registry
+  and the application's connections, with a user that bypasses the callout.
+- **A client account**, here `CLIENT`, that the callout places clients in. It
+  exchanges only jetcast's subjects with `APP` through stream exports and imports,
+  and carries the limits of client connections (see [Limits](#limits)). Set
+  `ServerOptions.Account` to it.
 - **An auth callout** whose issuer is the public key of the account key pair you pass as
   `ServerOptions.CalloutSigner`.
 - **A WebSocket listener.**
 - **Optionally a system account** user, for `jetcast.SystemAdmin` to kick connections on
   `Disconnect`.
+
+[`embedded.Accounts`](../embedded/config.go) renders the account and authorization
+blocks below for a prefix, credentials and limits; embedded servers can use it directly
+and standalone deployments can print it once. With the default prefix `jetcast`:
 
 ```hocon
 listen: 0.0.0.0:4222
@@ -33,6 +40,19 @@ accounts {
   APP {
     jetstream: enabled
     users: [ { user: app, password: $APP_PASSWORD } ]
+    exports: [
+      { stream: "jetcast.ev.>", accounts: [ CLIENT ] }   # channel events
+      { stream: "jetcast.c.>", accounts: [ CLIENT ] }    # replies, relays, control
+    ]
+    imports: [ { stream: { account: CLIENT, subject: "jetcast.rq.>" } } ]  # requests
+  }
+  CLIENT {
+    limits: { max_connections: 50000, max_subscriptions: 1000, max_payload: 65536 }
+    exports: [ { stream: "jetcast.rq.>", accounts: [ APP ] } ]
+    imports: [
+      { stream: { account: APP, subject: "jetcast.ev.>" } }
+      { stream: { account: APP, subject: "jetcast.c.>" } }
+    ]
   }
   SYS { users: [ { user: sys, password: $SYS_PASSWORD } ] }
 }
@@ -62,10 +82,33 @@ Application connection permissions, if you restrict the `app` user: publish
 subscribe `<prefix>.rq.>`, `<prefix>.ev.prv.>`, `<prefix>.sys.>`, `$SYS.REQ.USER.AUTH` and
 inboxes.
 
+Clients may also be placed in the application account itself (`Account: "APP"`, no
+`CLIENT` account), as in jetcast 0.1. Their permissions still confine them to their own
+subjects, but account limits would then also apply to the application's connections,
+which hold every relayed subscription of a node, so clients cannot be limited.
+
+### Encrypted callouts
+
+The callout request carries the client's token. To encrypt callout requests and
+responses, create a curve key pair (`nkeys.CreateCurveKeys()`, or `nsc generate nkey
+--curve`), set its public key as `xkey` in the `auth_callout` block (`Accounts.XKey`)
+and pass the key pair as `ServerOptions.CalloutXKey` (`nkeys.FromCurveSeed`). Every node
+needs the same key. Encryption matters when callout traffic crosses a network, as in a
+cluster; on an embedded server it never leaves the process.
+
 ### Limits
 
-Per-user limits in callout-issued JWTs are not enforced by NATS, so set account limits
-for the client account: `max_connections`, `max_subscriptions`, `max_payload`.
+NATS does not apply the user limits of callout-issued JWTs, so client connections are
+limited by the client account:
+
+| Limit | Applies to | `embedded.Accounts` default |
+|---|---|---|
+| `max_subscriptions` | each connection | 1000 |
+| `max_payload` | each message a client publishes | 64 KiB |
+| `max_connections` | the whole account | unlimited; size it for your deployment |
+
+A client uses one subscription per directly subscribed channel (public and granted
+channels) plus a few for its own subjects and recoveries; relayed channels use none.
 jetcast adds per-connection limits on relayed channels and concurrent requests
 (`ServerOptions.Limits`).
 

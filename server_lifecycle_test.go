@@ -18,7 +18,7 @@ func TestCloseAfterStartFailure(t *testing.T) {
 			}
 			t.Cleanup(nc.Close)
 			srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{
-				Account: "APP", CalloutSigner: h.env.Issuer,
+				Account: h.env.ClientAccount, CalloutSigner: h.env.Issuer,
 				ManageStreams: kind == "cancelled_context",
 			})
 			if err != nil {

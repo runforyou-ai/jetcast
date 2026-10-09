@@ -48,7 +48,13 @@ func (h *harness) channel(pattern string, f jetcast.AuthorizeFunc) {
 
 func newHarness(t *testing.T, cfg jetcast.Config) *harness {
 	t.Helper()
-	env, err := devenv.Start(devenv.Options{})
+	return newHarnessWith(t, cfg, devenv.Options{})
+}
+
+// newHarnessWith runs the embedded NATS server with the given options.
+func newHarnessWith(t *testing.T, cfg jetcast.Config, o devenv.Options) *harness {
+	t.Helper()
+	env, err := devenv.Start(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +72,7 @@ func (h *harness) node(mutate ...func(*jetcast.ServerOptions)) *jetcast.Server {
 	h.t.Cleanup(nc.Close)
 	opts := jetcast.ServerOptions{
 		Config:        h.cfg,
-		Account:       "APP",
+		Account:       h.env.ClientAccount,
 		CalloutSigner: h.env.Issuer,
 		Admin:         embedded.Admin(h.env.Server),
 		ManageStreams: true,

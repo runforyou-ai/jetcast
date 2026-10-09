@@ -21,7 +21,9 @@ jetcast 是一个通用的 Go 库加 TypeScript SDK，把服务端事件实时�
 |---|---|
 | 权限在连接时确定，不能在连接上更新；没有订阅时授权的钩子 | 私有频道默认走服务端中继；连接时授予的频道只是应用显式选择的优化 |
 | callout 配置文件模式可用，能拿到 token、连接名、连接类型、客户端地址；配置模式下用户 JWT 的 `aud` 必须是目标账号名 | 凭据作为 token 传入；callout 按配置的账号签发 |
-| callout 签发 JWT 中的用户级 `limits` 不生效；权限与 `exp` 生效 | 资源限制由账号级配置加库内业务级限制承担 |
+| callout 签发 JWT 中的用户级 `limits` 不生效；权限与 `exp` 生效 | 客户端放在独立的客户端账号中，由账号级配置限制每连接订阅数、载荷与账号连接数，加库内业务级限制 |
+| 账号级 `max_subscriptions`、`max_payload` 作用于账号内的每个连接 | 客户端账号与应用账号分开，应用连接（持有本节点全部中继订阅）不受客户端限制 |
+| 账号间的 stream 导出导入保留回复主题，影子订阅只在对端有订阅时存在 | 两个账号互相导入 jetcast 主题后协议不变，no responders 照常生效 |
 | 订阅权限 deny `"> >"` 可禁止所有队列订阅 | 浏览器 JWT 带上该 deny |
 | 一个 stream 只能有一条 RePublish；RePublish 只在 leader 执行，附加 `Nats-Sequence` 与该主题在转发时刻上一条已存消息的序号 `Nats-Last-Sequence` | 单一入口与出口命名空间；补发读取时由服务端重建序号 |
 | nats.go 创建的 KV 默认开启 AllowDirect，读取可能由落后的副本应答 | KV 与事件 stream 都关闭 AllowDirect，读取走 leader |
@@ -251,7 +253,7 @@ cfg := jetcast.Config{Prefix: "jetcast", Stream: "JETCAST", Ephemeral: []string{
 
 srv, err := jetcast.NewServer(nc, jetcast.ServerOptions{
     Config:        cfg,
-    Account:       "APP",
+    Account:       "CLIENT",
     CalloutSigner: issuerKey,
     CalloutXKey:   xkey,                         // 可选
     Admin:         jetcast.SystemAdmin(sysConn), // 可选
@@ -304,6 +306,7 @@ await echo.close()
 
 ## 14. 部署
 
+- 账号：应用账号（如 `APP`）持有 stream、KV 与应用连接；客户端账号（如 `CLIENT`）由 callout 放入客户端。应用账号向客户端账号导出 `<p>.ev.>` 与 `<p>.c.>`，客户端账号向应用账号导出 `<p>.rq.>`，双方以 stream 方式导入；客户端账号设置 `max_subscriptions`、`max_payload`、`max_connections`。`embedded.Accounts` 生成这部分配置。客户端也可以与应用共用一个账号，此时无法限制客户端连接。
 - 应用节点以 callout 的 `auth_users` 身份连接，需要：发布 `<p>.in.>`、`<p>.ev.>`、`<p>.c.>`、`<p>.sys.>`；订阅 `<p>.rq.>`、`<p>.ev.prv.>`、`<p>.sys.>`、`$SYS.REQ.USER.AUTH`；访问 stream 与 KV 的 JetStream API。
 - 第一期提供示例：嵌入式服务端 Go 示例、独立部署 `nats-server.conf`、nginx 与负载均衡反代配置、Go `httputil.ReverseProxy` 反代示例。
 - 文档注意事项：`same_origin` 在终止 TLS 的代理后会误判，应使用 `allowed_origins`；集群设置 `websocket.advertise` 或在客户端忽略集群地址推送；代理读超时大于 NATS ping 周期；凭据长度受 `max_control_line`（默认 4096 字节）限制；可用 `token_cookie` 改用 HttpOnly cookie 传凭据。
@@ -312,7 +315,7 @@ await echo.close()
 
 - **第一期**：本文全部内容。
 - **第二期**：presence、whisper、React hooks、与 jetq 衔接（排队广播、事务提交后广播）、模型广播约定、配置生成器与 Go 反代组件。
-- **第三期**：按需查询历史、浏览器用户独立账号与 `Nats-Request-Info`、无 callout 模式、OpenTelemetry、多 stream 分片。
+- **第三期**：按需查询历史、无 callout 模式、OpenTelemetry、多 stream 分片。
 
 ## 16. 验收用例
 
