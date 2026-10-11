@@ -13,7 +13,7 @@ jetcast 是一个通用的 Go 库加 TypeScript SDK，把服务端事件实时�
 - 授权由 NATS 服务端强制执行。
 - 借助 JetStream：频道事件短期留存，客户端能发现漏收并补齐；无法证明完整时明确告知应用。
 
-**非目标（第一期）**：长期消息存储与历史查询、presence、whisper、React hooks、模型广播约定、Go 反代组件（只提供示例）。NATS 账号与 callout 配置由 `embedded.Accounts` 生成。
+**非目标（第一期）**：长期消息存储与历史查询、presence、whisper、React hooks、Go 反代组件（只提供示例）。NATS 账号与 callout 配置由 `embedded.Accounts` 生成。
 
 ## 2. NATS 事实与对应决策（v2.15，已对照源码核实）
 
@@ -92,7 +92,7 @@ callout 请求进入节点内的队列（容量为 worker 数的 4 倍），由�
 
 ### 4.4 hello 与过期刷新
 
-连接后 SDK 发 `hello`，回复包含本连接的 `Info`、授予模式、过期时间、stream epoch 与留存配置，以及本连接的来源标记 `origin`（见第 8 节来源连接回调抑制）与并发请求上限 `maxRequests`。SDK 在每个连接上同时最多发出 `maxRequests` 个等待回复的请求（`sub`、`heads`、`recover`、`renew`），其余排队等候名额，续约排在其他请求之前，订阅尝试被替换后其排队中的请求不再发送，名额就绪后才开始计算请求超时；连接建立后的整批重新订阅因此不会被回复 `overloaded`。订阅失败后的重试从 1 秒开始按指数退避，最长 30 秒，成功后复位。
+连接后 SDK 发 `hello`，回复包含本连接的 `Info`、授予模式、过期时间、stream epoch 与留存配置，以及本连接的来源标记 `origin`（见第 8 节广播）与并发请求上限 `maxRequests`。SDK 在每个连接上同时最多发出 `maxRequests` 个等待回复的请求（`sub`、`heads`、`recover`、`renew`），其余排队等候名额，续约排在其他请求之前，订阅尝试被替换后其排队中的请求不再发送，名额就绪后才开始计算请求超时；连接建立后的整批重新订阅因此不会被回复 `overloaded`。订阅失败后的重试从 1 秒开始按指数退避，最长 30 秒，成功后复位。
 
 - SDK 在过期前（剩余 10%，至少 30 秒）调用 `getToken()`，新建连接（新 socket）并切换，旧连接在切换完成后关闭。页面从后台恢复时立即检查。
 - `getToken()` 抛出 `UnauthorizedError` 时进入 `stopped`；其他错误带抖动退避重试。
@@ -202,12 +202,13 @@ SDK 每 30 秒（带抖动；页面从后台恢复时立即）对本周期没有
 ## 8. 广播
 
 ```go
-pub := jetcast.NewPublisher(nc, cfg)
+pub, err := jetcast.NewPublisher(nc, cfg)
+if err != nil { return err }
 res, err := pub.Broadcast(ctx, jetcast.Event{
     Name:     "order.shipped",
     Channels: []jetcast.Channel{jetcast.Private("orders.42"), jetcast.Private("users.7.feed")},
     Data:     v,                // []byte 原样；其他值 JSON 编码
-    Origin:   socketID,         // 可选，即 origin suppression
+    Origin:   socketID,         // 可选，即 来源连接回调抑制
 })
 ```
 
@@ -215,7 +216,7 @@ res, err := pub.Broadcast(ctx, jetcast.Event{
 - 发布时显式指定事件名称、频道与载荷；应用在调用前判断是否需要发布。
 - 每个频道一次 JetStream 发布，`Nats-Msg-Id` 为 `<事件 ID>:<pub|prv>:<频道>`，去重窗口内重试不会重复。多频道广播不是原子的，结果逐频道列出成功与失败。
 - 消息头只由库设置；应用数据不能覆盖 `Jetcast-*`、`Nats-*` 头。事件大小不能超过连接的 `max_payload` 减去头部开销，超出时 `Broadcast` 直接返回错误。
-- **来源连接回调抑制**：照常投递，SDK 推进游标但不触发来源连接的回调。事件的 `Jetcast-Origin` 是 socket id 的摘要（SHA-256 截断），由 hello 告知本连接，其他订阅者无法从事件得知别的连接的 socket id；SDK 同时记住本连接的摘要与原始 socket id（旧版本服务端发布的事件带原始 id；hello 来自旧版本服务端时 SDK 自行计算摘要），并在被替换连接的事件离开留存窗口后忘掉它们。来源 socket id 由客户端在 `X-Socket-ID` 中自报，库不校验它属于发起请求的用户：伪造者最多让持有该 socket 的连接错过一次本应收到的回调，所以 origin suppression 只用于省去发起者的重复更新，不是安全或保密手段。
+- **来源连接回调抑制**：照常投递，SDK 推进游标但不触发来源连接的回调。事件的 `Jetcast-Origin` 是 socket id 的摘要（SHA-256 截断），由 hello 告知本连接，其他订阅者无法从事件得知别的连接的 socket id；SDK 同时记住本连接的摘要与原始 socket id（旧版本服务端发布的事件带原始 id；hello 来自旧版本服务端时 SDK 自行计算摘要），并在被替换连接的事件离开留存窗口后忘掉它们。来源 socket id 由客户端在 `X-Socket-ID` 中自报，库不校验它属于发起请求的用户：伪造者最多让持有该 socket 的连接错过一次本应收到的回调，所以 来源连接回调抑制 只用于省去发起者的重复更新，不是安全或保密手段。
 
 ## 9. 撤销与连接管理
 
@@ -297,7 +298,7 @@ await client.close()
 ```
 
 - `recovered: false` 的 `reason`：`initial`、`expired`、`epoch`、`too_far`、`ephemeral`。
-- `socketId` 在换新连接后变化；`origin suppression` 依赖应用在每次 API 请求时读取当前值。
+- `socketId` 在换新连接后变化；`来源连接回调抑制` 依赖应用在每次 API 请求时读取当前值。
 - 依赖 `@nats-io/nats-core` v3。
 
 ## 13. Go 客户端
@@ -314,7 +315,7 @@ await client.close()
 ## 15. 分期
 
 - **第一期**：本文全部内容。
-- **第二期**：presence、whisper、React hooks、与 jetq 衔接（排队广播、事务提交后广播）、模型广播约定与 Go 反代组件。
+- **第二期**：presence、whisper、React hooks、与 jetq 衔接（排队广播、事务提交后广播）与 Go 反代组件。
 - **第三期**：按需查询历史、无 callout 模式、OpenTelemetry、多 stream 分片。
 
 ## 16. 验收用例
@@ -324,7 +325,7 @@ await client.close()
 3. 中继频道：授权允许与拒绝；`ready` 后发布的事件送达；`leave` 后不再收到；同一频道新旧 `sid` 并存时只交付当前 `sid`。
 4. 多节点：任意节点广播都能送达；中继节点退出后在其他节点重建，期间事件经补发补齐。
 5. 缺口：丢弃一条实时事件后下一条触发补发；最后一条丢失由 heads 发现；频道静默且 `pos` 之后有淘汰时报告 `expired`；空频道首条漏收后过期报告 `expired`；补发进行中发生淘汰报告 `expired`；stream 重建报告 `epoch`。
-6. origin suppression：来源连接不触发回调，游标正常推进。
+6. 来源连接回调抑制：来源连接不触发回调，游标正常推进。
 7. 安全：重复使用已登记 socket 的连接被拒绝；吊销期间的在途 callout 被拒绝；回复主题不属于本连接时请求被丢弃；浏览器不能发布到频道、不能做队列订阅、不能补发未授权频道。
 8. `Refresh` 后新授予可用；`Disconnect` 标记登记、踢出连接，不配合的客户端也被断开；JWT 到期前 SDK 无感换新连接。
 9. 嵌入式单机、独立 NATS、三节点集群（含 stream leader 切换）分别走通。

@@ -17,7 +17,7 @@ type Event struct {
 	// broadcast with the same ID within the stream's duplicate window does not
 	// deliver it twice.
 	ID string
-	// Name is the event name clients listen for, such as "order.shipped".
+	// Name is the required, nonempty event name clients listen for, such as "order.shipped".
 	Name string
 	// Channels lists the channels the event is broadcast on.
 	Channels []Channel

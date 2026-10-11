@@ -9,6 +9,8 @@ client says so, and the application reloads its data.
 npm install @runforyou/jetcast
 ```
 
+Version 0.3 exports the connection type as `Client`. See the [migration examples](../docs/migration-0.3.md) when upgrading from 0.2.
+
 ## Usage
 
 ```ts
@@ -143,7 +145,7 @@ own versions to join snapshots and events.
   out. Any other error is retried with backoff.
 - The server's `Disconnect` also stops the client.
 
-## origin suppression
+## Origin suppression
 
 Broadcasts can identify the socket that caused them to suppress its listeners.
 Send `client.socketId` with your API requests, conventionally in the

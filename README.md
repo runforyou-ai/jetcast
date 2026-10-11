@@ -29,6 +29,8 @@ The server publishes named events to channels; clients subscribe to channels, wi
 
 Requires nats-server **2.14.4+** (2.15 recommended) with JetStream, and Go 1.26+.
 
+Version 0.3 changes the Go publication API and TypeScript connection type. Read the [migration examples](docs/migration-0.3.md) when upgrading from 0.2.
+
 ## Install
 
 ```sh
