@@ -1,5 +1,6 @@
 // Package jetcast broadcasts server events to browsers and other clients that
-// connect directly to NATS, in the spirit of Laravel Broadcasting and Echo.
+// connect directly to NATS. Applications publish explicitly named events and
+// authorize subscriptions to private channels.
 //
 // Application code broadcasts events on channels; clients listen on channels.
 // Public channels need no authorization. Private channels are authorized by the

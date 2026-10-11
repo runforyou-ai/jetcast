@@ -6,23 +6,21 @@
 [中文](README.zh-CN.md)
 
 jetcast pushes server events to browsers that connect **directly to NATS** over WebSocket.
-If you know Laravel Broadcasting and Echo, you already know jetcast: the server broadcasts
-events on channels, clients listen on channels, and private channels are authorized by
-callbacks you write.
+The server publishes named events to channels; clients subscribe to channels, with application-defined authorization for private channels.
 
 - **Browsers on NATS, authorization enforced by NATS.** Clients authenticate through the
   NATS auth callout with your own tokens; every connection gets a JWT that allows exactly
   its channels and its own namespace. Clients live in their own NATS account, which limits
   their connections, subscriptions and payloads.
-- **Laravel-style channels.** `srv.Channel("orders.{id}", authorize)` decides at subscribe
-  time, like `routes/channels.php`. Stable, broad grants (a user's own feed, a team's
+- **Channel authorization.** `srv.Channel("orders.{id}", authorize)` decides at subscribe
+  time. Stable, broad grants (a user's own feed, a team's
   channels) can be given at connect time instead, so NATS routes them without touching
   your servers.
 - **Missed events are recovered.** Events are retained in a JetStream stream for a few
   minutes. Clients detect gaps, including a lost last event, and fetch what they missed
   after a reconnect. When recovery is impossible they tell you, so you reload instead of
   silently showing stale data.
-- **`toOthers`, revocation and refresh.** Exclude the sender of an action, revoke a user's
+- **`origin suppression`, revocation and refresh.** Exclude the sender of an action, revoke a user's
   or session's connections (kicking clients that do not cooperate), and let clients pick up
   new grants.
 - **No assumptions about deployment.** The library takes a `*nats.Conn`. NATS can be
@@ -30,6 +28,8 @@ callbacks you write.
   server, nginx or a load balancer.
 
 Requires nats-server **2.14.4+** (2.15 recommended) with JetStream, and Go 1.26+.
+
+Version 0.3 changes the Go publication API and TypeScript connection type. Read the [migration examples](docs/migration-0.3.md) when upgrading from 0.2.
 
 ## Install
 
@@ -63,7 +63,7 @@ srv.Grants(func(ctx context.Context, u jetcast.User) ([]string, error) {
 	return []string{"users." + u.ID + ".>"}, nil
 })
 
-// Private channels authorized at subscribe time, like routes/channels.php.
+// Private channels authorized at subscribe time.
 srv.Channel("orders.{id}", func(ctx context.Context, u jetcast.User, p jetcast.Params) (bool, error) {
 	return orders.CanView(ctx, u.ID, p["id"])
 })
@@ -80,17 +80,9 @@ _, err := pub.Broadcast(ctx, jetcast.Event{
 	Name:     "order.shipped",
 	Channels: []jetcast.Channel{jetcast.Private("orders.42")},
 	Data:     order,                  // JSON-encoded
-	Origin:   jetcast.SocketID(r),    // toOthers: the X-Socket-ID of the request
+	Origin:   jetcast.SocketID(r),    // origin suppression: the X-Socket-ID of the request
 })
 
-// Or with an event type, like ShouldBroadcast:
-type OrderShipped struct{ ID int `json:"id"` }
-func (e OrderShipped) BroadcastOn() []jetcast.Channel {
-	return []jetcast.Channel{jetcast.Private(fmt.Sprintf("orders.%d", e.ID))}
-}
-func (OrderShipped) BroadcastAs() string { return "order.shipped" }
-
-pub.Dispatch(ctx, OrderShipped{ID: 42}, jetcast.ToOthers(jetcast.SocketID(r)))
 ```
 
 Revocation and refresh:
@@ -106,7 +98,7 @@ srv.Disconnect(ctx, jetcast.BySession("u42", sessionID)) // after invalidating t
 ```ts
 import { connect, UnauthorizedError } from "@runforyou/jetcast"
 
-const echo = await connect({
+const client = await connect({
   servers: "wss://example.com/nats",
   getToken: async () => {
     const res = await fetch("/api/realtime-token")
@@ -115,17 +107,17 @@ const echo = await connect({
   },
 })
 
-echo.channel("news").listen("article.published", (article) => render(article))
+client.channel("news").listen("article.published", (article) => render(article))
 
-const orders = echo.private("orders.42")
+const orders = client.private("orders.42")
 orders.listen("order.shipped", (order) => update(order))
 orders.onState(({ state, recovered }) => {
   if (state === "subscribed" && recovered === false) reloadOrder()
 })
 await orders.ready()
 
-// toOthers: send the socket ID with your API requests.
-fetch("/api/orders/42/ship", { method: "POST", headers: { "X-Socket-ID": echo.socketId } })
+// origin suppression: send the socket ID with your API requests.
+fetch("/api/orders/42/ship", { method: "POST", headers: { "X-Socket-ID": client.socketId } })
 ```
 
 Go programs such as background agents use [`client`](client), which has the same API.
@@ -153,7 +145,7 @@ Details: [design](docs/design.md) (Chinese) and [deployment](docs/deployment.md)
   If `Disconnect` returns an error, the application must retry it to complete
   enforcement; retries include already-revoked connections. Persist the retry
   intent when enforcement must survive an application restart.
-- `toOthers` suppresses the sender's listeners; it is not a security mechanism. The
+- `origin suppression` suppresses the sender's listeners; it is not a security mechanism. The
   socket ID is reported by the client and not verified, and events carry only a digest
   of it, so other subscribers cannot learn socket IDs.
 

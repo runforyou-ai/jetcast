@@ -1,7 +1,6 @@
 # @runforyou/jetcast
 
-TypeScript client for jetcast: Laravel Broadcasting and Echo
-on NATS. Browsers connect directly to NATS over WebSocket and receive events
+TypeScript client for jetcast: receive named events over NATS. Browsers connect directly to NATS over WebSocket and receive events
 that the server broadcasts on channels. Missed events are detected and
 recovered from a short JetStream history; when recovery is impossible the
 client says so, and the application reloads its data.
@@ -10,12 +9,14 @@ client says so, and the application reloads its data.
 npm install @runforyou/jetcast
 ```
 
+Version 0.3 exports the connection type as `Client`. See the [migration examples](../docs/migration-0.3.md) when upgrading from 0.2.
+
 ## Usage
 
 ```ts
 import { connect, UnauthorizedError } from "@runforyou/jetcast";
 
-const echo = await connect({
+const client = await connect({
   servers: "wss://example.com/nats",
   getToken: async () => {
     const r = await fetch("/api/realtime-token", { method: "POST" });
@@ -25,11 +26,11 @@ const echo = await connect({
   },
 });
 
-echo.channel("news").listen("article.published", (data, meta) => {
+client.channel("news").listen("article.published", (data, meta) => {
   console.log(meta.event, meta.sequence, data);
 });
 
-const orders = echo
+const orders = client
   .private("orders.42")
   .listen("order.shipped", (data) => render(data));
 
@@ -41,19 +42,19 @@ orders.onState(({ state, recovered, reason }) => {
 
 await orders.ready(); // first subscribed; rejects if denied
 
-// Exclude this client from broadcasts it causes (toOthers).
+// Exclude this client from broadcasts it causes (origin suppression).
 await fetch("/api/orders/42/ship", {
   method: "POST",
-  headers: { "X-Socket-ID": echo.socketId },
+  headers: { "X-Socket-ID": client.socketId },
 });
 
 orders.leave();
-await echo.close();
+await client.close();
 ```
 
 ## API
 
-### `connect(options): Promise<Echo>`
+### `connect(options): Promise<Client>`
 
 Resolves once the first connection is established; rejects when `getToken`
 throws `UnauthorizedError` first.
@@ -66,7 +67,7 @@ throws `UnauthorizedError` first.
 | `headsInterval` | How often idle channels are checked for missed events, in milliseconds; 30000 by default. |
 | `logger` | Object with optional `debug` and `warn` methods. Warnings go to `console.warn` by default; pass `{}` to silence them. |
 
-### `Echo`
+### `Client`
 
 | Member | Description |
 |---|---|
@@ -144,10 +145,10 @@ own versions to join snapshots and events.
   out. Any other error is retried with backoff.
 - The server's `Disconnect` also stops the client.
 
-## toOthers
+## Origin suppression
 
-Broadcasts can name the socket that caused them, like Laravel's `toOthers()`.
-Send `echo.socketId` with your API requests, conventionally in the
+Broadcasts can identify the socket that caused them to suppress its listeners.
+Send `client.socketId` with your API requests, conventionally in the
 `X-Socket-ID` header, and pass it to the broadcast (`jetcast.SocketID(r)` on
 the Go side). The client still receives such events and advances its cursor,
 but does not call its listeners. This also holds for sockets it used before a

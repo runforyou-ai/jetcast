@@ -328,7 +328,7 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-func TestToOthers(t *testing.T) {
+func TestOriginSuppression(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
 	srv := h.node()
 	h.allow("alice", "orders.1")
@@ -771,22 +771,25 @@ type orderShipped struct {
 	ID int `json:"id"`
 }
 
-func (o orderShipped) BroadcastOn() []jetcast.Channel {
-	return []jetcast.Channel{jetcast.Public(fmt.Sprintf("shipments.%d", o.ID))}
-}
-
-func TestDispatch(t *testing.T) {
+func TestExplicitEventName(t *testing.T) {
 	h := newHarness(t, jetcast.Config{})
 	srv := h.node()
 	a := h.client("alice:s1")
 	s := a.Channel("shipments.8")
 	c := collect(s)
 	ready(t, s)
-	if _, err := srv.Dispatch(context.Background(), orderShipped{ID: 8}); err != nil {
+	if _, err := srv.Broadcast(context.Background(), jetcast.Event{
+		Name: "order.shipped", Channels: []jetcast.Channel{jetcast.Public("shipments.8")}, Data: orderShipped{ID: 8},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if e := c.next(t); e.Name != "orderShipped" || string(e.Data) != `{"id":8}` {
+	if e := c.next(t); e.Name != "order.shipped" || string(e.Data) != `{"id":8}` {
 		t.Fatalf("event %+v %s", e, e.Data)
+	}
+	if _, err := srv.Broadcast(context.Background(), jetcast.Event{
+		Channels: []jetcast.Channel{jetcast.Public("shipments.8")}, Data: orderShipped{ID: 8},
+	}); err == nil {
+		t.Fatal("event without an explicit name was accepted")
 	}
 }
 

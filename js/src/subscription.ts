@@ -79,7 +79,7 @@ const maxRecoverEvents = 10_000;
 const maxRecoverBytes = 16 << 20;
 const maxBuffered = 1000;
 
-/** A subscription to one channel. Obtain it from `echo.channel()` or `echo.private()`. */
+/** A subscription to one channel. Obtain it from `client.channel()` or `client.private()`. */
 export class Channel {
   /** "<kind>.<name>", as used on the wire. */
   readonly key: string;
