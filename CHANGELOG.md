@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0
+
+- Publish events through `Broadcast(ctx, Event)` with explicit names, channels, payloads, IDs and origin sockets. Remove `Dispatch`, `Broadcastable` and their implicit hooks and options.
+- Export the TypeScript connection as `Client`; `connect` returns `Promise<Client>`.
+- Describe the Go library and SDK as independent projects throughout the documentation.
+
+### Migration
+
+Replace `Dispatch` calls with `Broadcast` and an `Event`. Set `Name` explicitly, move conditional publication into application code, and set `Data`, `Origin` and `ID` on the event. Replace the previous TypeScript connection type imports with `Client`. The wire protocol is unchanged.
+
 All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
@@ -93,7 +103,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 - Server: auth callout with a JetStream connection registry, connect-time
   grants, subscribe-time channel authorizers with relayed delivery, broadcast
-  and dispatch with toOthers, Refresh, Leave and Disconnect with pluggable
+  and dispatch with origin suppression, Refresh, Leave and Disconnect with pluggable
   connection admins.
 - Event retention in a JetStream stream with gap detection, head checks and
   recovery that reports when it cannot be complete.

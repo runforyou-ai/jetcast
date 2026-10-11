@@ -57,24 +57,6 @@ func Example() {
 	})
 }
 
-type OrderShipped struct {
-	ID int `json:"id"`
-}
-
-func (e OrderShipped) BroadcastOn() []jetcast.Channel {
-	return []jetcast.Channel{jetcast.Private(fmt.Sprintf("orders.%d", e.ID))}
-}
-
-func (OrderShipped) BroadcastAs() string { return "order.shipped" }
-
-func ExamplePublisher_Dispatch() {
-	nc, _ := nats.Connect(nats.DefaultURL)
-	pub, _ := jetcast.NewPublisher(nc, jetcast.Config{})
-	if _, err := pub.Dispatch(context.Background(), OrderShipped{ID: 42}); err != nil {
-		log.Println(err)
-	}
-}
-
 func ExampleMatchPattern() {
 	fmt.Println(jetcast.MatchPattern("users.42.>", "users.42.notifications"))
 	fmt.Println(jetcast.MatchPattern("teams.*.board", "teams.7.board"))

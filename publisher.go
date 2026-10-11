@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -26,34 +25,13 @@ type Event struct {
 	// values are encoded as JSON.
 	Data any
 	// Origin is the socket ID of the client that caused the event. Clients
-	// with that socket receive the event without invoking their listeners,
-	// like Laravel's toOthers. Events carry a digest of it, so subscribers do
+	// with that socket receive the event without invoking their listeners.
+	// Events carry a digest of it, so subscribers do
 	// not learn other connections' socket IDs. The socket ID comes from the
-	// client, typically the X-Socket-ID header, and is not verified: toOthers
+	// client, typically the X-Socket-ID header, and is not verified: suppression
 	// only spares the sender a redundant update and is not a security
 	// mechanism.
 	Origin string
-}
-
-// Broadcastable is implemented by event types, like Laravel's ShouldBroadcast.
-// Such types may also implement BroadcastAs() string to name the event (the
-// type name by default), BroadcastWith() any to choose the payload (the value
-// itself by default) and BroadcastWhen() bool to skip broadcasting.
-type Broadcastable interface {
-	BroadcastOn() []Channel
-}
-
-// BroadcastOption configures [Publisher.Dispatch].
-type BroadcastOption func(*Event)
-
-// ToOthers excludes the client with the given socket ID from listeners.
-func ToOthers(socketID string) BroadcastOption {
-	return func(e *Event) { e.Origin = socketID }
-}
-
-// WithEventID sets the event ID, for idempotent retries.
-func WithEventID(id string) BroadcastOption {
-	return func(e *Event) { e.ID = id }
 }
 
 // ChannelResult is the outcome of broadcasting on one channel.
@@ -103,30 +81,6 @@ func NewPublisher(nc *nats.Conn, cfg Config) (*Publisher, error) {
 		return nil, err
 	}
 	return &Publisher{nc: nc, js: js, cfg: cfg, sub: subjects{cfg.Prefix}}, nil
-}
-
-// Dispatch broadcasts an event type, like Laravel's broadcast(new Event).
-func (p *Publisher) Dispatch(ctx context.Context, v Broadcastable, opts ...BroadcastOption) (BroadcastResult, error) {
-	if w, ok := v.(interface{ BroadcastWhen() bool }); ok && !w.BroadcastWhen() {
-		return BroadcastResult{}, nil
-	}
-	ev := Event{Channels: v.BroadcastOn(), Data: any(v)}
-	if a, ok := v.(interface{ BroadcastAs() string }); ok {
-		ev.Name = a.BroadcastAs()
-	} else {
-		t := reflect.TypeOf(v)
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		ev.Name = t.Name()
-	}
-	if w, ok := v.(interface{ BroadcastWith() any }); ok {
-		ev.Data = w.BroadcastWith()
-	}
-	for _, opt := range opts {
-		opt(&ev)
-	}
-	return p.Broadcast(ctx, ev)
 }
 
 // Broadcast publishes ev on each of its channels. Retained channels are

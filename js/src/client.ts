@@ -58,10 +58,10 @@ function renewPeriod(conn: Connection): number {
 }
 
 /** Connects and resolves once the first connection is established. */
-export async function connect(opts: ConnectOptions): Promise<Echo> {
-  const echo = new Echo(opts);
-  await echo.started;
-  return echo;
+export async function connect(opts: ConnectOptions): Promise<Client> {
+  const client = new Client(opts);
+  await client.started;
+  return client;
 }
 
 /**
@@ -70,7 +70,7 @@ export async function connect(opts: ConnectOptions): Promise<Echo> {
  * expiry, the client opens a new one and resubscribes every channel,
  * recovering missed events.
  */
-export class Echo {
+export class Client {
   private readonly servers: string[];
   private readonly getToken: () => Promise<string> | string;
   private readonly prefix: string;
@@ -82,7 +82,7 @@ export class Echo {
   private statusFns: ((s: Status) => void)[] = [];
   private subs = new Map<string, Channel>();
   /**
-   * Jetcast-Origin values of this client's connections, for toOthers, with
+   * Jetcast-Origin values of this client's connections, for origin suppression, with
    * when each connection was replaced (0 for the current one). Events of
    * replaced connections can arrive until they leave the retention window.
    */

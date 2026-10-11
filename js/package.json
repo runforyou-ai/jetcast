@@ -1,7 +1,7 @@
 {
   "name": "@runforyou/jetcast",
-  "version": "0.2.0",
-  "description": "Laravel Echo style client for jetcast: receive server-broadcast events over NATS WebSocket.",
+  "version": "0.3.0",
+  "description": "TypeScript client for named realtime events over NATS WebSocket.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,7 +31,6 @@
     "nats",
     "websocket",
     "broadcasting",
-    "echo",
     "realtime"
   ],
   "scripts": {

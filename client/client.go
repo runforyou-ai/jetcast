@@ -88,7 +88,7 @@ type Client struct {
 	statusFn []func(Status)
 	subs     map[string]*Subscription
 	// origins holds the Jetcast-Origin values of this client's connections,
-	// for toOthers, with the time each connection was replaced (zero for the
+	// for origin suppression, with the time each connection was replaced (zero for the
 	// current one). Events of replaced connections can arrive until they
 	// leave the retention window.
 	origins    map[string]time.Time

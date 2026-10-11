@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Connection } from "../src/connection.js";
-import { connect, UnauthorizedError, type Echo } from "../src/index.js";
+import { connect, UnauthorizedError, type Client } from "../src/index.js";
 import { broadcast, client, control, maxAgeMs, Recorder, uniq, waitFor, wsUrl, type TestClient } from "./helpers.js";
 
 const clients: TestClient[] = [];
@@ -13,7 +13,7 @@ async function open(user?: string, headsInterval?: number): Promise<TestClient> 
 }
 
 afterEach(async () => {
-  await Promise.all(clients.splice(0).map((c) => c.echo.close()));
+  await Promise.all(clients.splice(0).map((c) => c.client.close()));
 });
 
 /** Internal delivery path of a channel, for assertions. */
@@ -24,9 +24,9 @@ function pathOf(ch: unknown): string {
 describe("connection", () => {
   it("connects with a socket ID and reports info", async () => {
     const c = await open();
-    expect(c.echo.status).toBe("connected");
-    expect(c.echo.socketId).toMatch(/^[0-9A-Za-z]{22}$/);
-    expect(c.echo.info).toEqual({ name: c.user });
+    expect(c.client.status).toBe("connected");
+    expect(c.client.socketId).toMatch(/^[0-9A-Za-z]{22}$/);
+    expect(c.client.info).toEqual({ name: c.user });
   });
 
   it("rejects connect when getToken throws UnauthorizedError", async () => {
@@ -39,13 +39,13 @@ describe("connection", () => {
     const c = await open();
     const name = uniq("news");
     const rec = new Recorder();
-    const ch = c.echo
+    const ch = c.client
       .channel(name)
       .listen("boom", () => {
         throw new Error("listener failure");
       })
       .listen("boom", rec.listener);
-    c.echo.onStatus(() => {
+    c.client.onStatus(() => {
       throw new Error("status listener failure");
     });
     await ch.ready();
@@ -63,10 +63,10 @@ describe("public channels", () => {
     const ra = new Recorder();
     const rb = new Recorder();
     const all = new Recorder();
-    const cha = a.echo.channel(name).listen("article.published", ra.listener).listenAll(all.listener);
+    const cha = a.client.channel(name).listen("article.published", ra.listener).listenAll(all.listener);
     cha.onState(ra.onState);
-    const chb = b.echo.channel(name).listen("article.published", rb.listener);
-    expect(a.echo.channel(name)).toBe(cha);
+    const chb = b.client.channel(name).listen("article.published", rb.listener);
+    expect(a.client.channel(name)).toBe(cha);
     await Promise.all([cha.ready(), chb.ready()]);
     expect(ra.states).toEqual([{ state: "subscribed", recovered: false, reason: "initial" }]);
 
@@ -93,12 +93,12 @@ describe("public channels", () => {
     const c = await open();
     const name = uniq("news");
     const rec = new Recorder();
-    const ch = c.echo.channel(name).listenAll(rec.listener);
+    const ch = c.client.channel(name).listenAll(rec.listener);
     ch.onState(rec.onState);
     await ch.ready();
     ch.leave();
     await waitFor(() => rec.lastState()?.state === "left", "left");
-    expect(c.echo.channel(name)).not.toBe(ch);
+    expect(c.client.channel(name)).not.toBe(ch);
     await broadcast("x", [`pub.${name}`], 1);
     await new Promise((r) => setTimeout(r, 200));
     expect(rec.events).toHaveLength(0);
@@ -108,7 +108,7 @@ describe("public channels", () => {
     const c = await open();
     const name = `typing.${uniq("t")}`;
     const rec = new Recorder();
-    const ch = c.echo.channel(name).listenAll(rec.listener);
+    const ch = c.client.channel(name).listenAll(rec.listener);
     ch.onState(rec.onState);
     await ch.ready();
     expect(rec.states).toEqual([{ state: "subscribed", recovered: false, reason: "ephemeral" }]);
@@ -120,7 +120,7 @@ describe("public channels", () => {
 
   it("denies invalid channel names", async () => {
     const c = await open();
-    await expect(c.echo.channel("bad.*").ready()).rejects.toThrow(/invalid channel/);
+    await expect(c.client.channel("bad.*").ready()).rejects.toThrow(/invalid channel/);
   });
 });
 
@@ -131,7 +131,7 @@ describe("private channels", () => {
     const c = await open(user);
     const name = `${user}.feed`;
     const rec = new Recorder();
-    const ch = c.echo.private(name).listen("e", rec.listener);
+    const ch = c.client.private(name).listen("e", rec.listener);
     await ch.ready();
     expect(pathOf(ch)).toBe("direct");
     await broadcast("e", [`prv.${name}`], 1);
@@ -143,7 +143,7 @@ describe("private channels", () => {
     const name = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: name });
     const rec = new Recorder();
-    const ch = c.echo.private(name).listen("order.shipped", rec.listener);
+    const ch = c.client.private(name).listen("order.shipped", rec.listener);
     await ch.ready();
     expect(pathOf(ch)).toBe("relay");
     for (let i = 1; i <= 3; i++) await broadcast("order.shipped", [`prv.${name}`], i);
@@ -160,11 +160,11 @@ describe("private channels", () => {
     const c = await open();
     const name = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: name });
-    const ch = c.echo.private(name);
+    const ch = c.client.private(name);
     await ch.ready();
     expect(pathOf(ch)).toBe("relay");
     // Every request slot is taken; the next renewal waits for one.
-    const conn = (c.echo as unknown as { conn: Connection }).conn;
+    const conn = (c.client as unknown as { conn: Connection }).conn;
     const max = conn.hello.maxRequests && conn.hello.maxRequests > 0 ? conn.hello.maxRequests : 8;
     for (let i = 0; i < max; i++) await conn.acquire();
     await waitFor(() => (conn as unknown as { urgent: unknown[] }).urgent.length > 0, "queued renewal");
@@ -179,7 +179,7 @@ describe("private channels", () => {
     const c = await open();
     const name = `orders.${uniq("o")}`;
     const rec = new Recorder();
-    const ch = c.echo.private(name);
+    const ch = c.client.private(name);
     ch.onState(rec.onState);
     await expect(ch.ready()).rejects.toThrow(/denied/);
     await waitFor(() => rec.lastState()?.state === "denied", "denied state");
@@ -190,7 +190,7 @@ describe("private channels", () => {
     const name = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: name });
     const rec = new Recorder();
-    const ch = c.echo.private(name);
+    const ch = c.client.private(name);
     ch.onState(rec.onState);
     await ch.ready();
     await control("/leave", { channel: `prv.${name}`, user: c.user });
@@ -199,18 +199,18 @@ describe("private channels", () => {
   });
 });
 
-describe("toOthers", () => {
+describe("origin suppression", () => {
   it("skips the origin's listeners and keeps its cursor", async () => {
     const [a, b] = await Promise.all([open(), open()]);
     const name = uniq("news");
     const ra = new Recorder();
     const rb = new Recorder();
-    const cha = a.echo.channel(name).listenAll(ra.listener);
+    const cha = a.client.channel(name).listenAll(ra.listener);
     cha.onState(ra.onState);
-    const chb = b.echo.channel(name).listenAll(rb.listener);
+    const chb = b.client.channel(name).listenAll(rb.listener);
     await Promise.all([cha.ready(), chb.ready()]);
 
-    await broadcast("mine", [`pub.${name}`], 1, a.echo.socketId);
+    await broadcast("mine", [`pub.${name}`], 1, a.client.socketId);
     await waitFor(() => rb.events.length === 1, "event at b");
     const next = await broadcast("next", [`pub.${name}`], 2);
     await waitFor(() => ra.events.length === 1 && rb.events.length === 2, "next event");
@@ -227,16 +227,16 @@ describe("reconnection", () => {
     const c = await open();
     const name = uniq("news");
     const rec = new Recorder();
-    const ch = c.echo.channel(name).listenAll(rec.listener);
+    const ch = c.client.channel(name).listenAll(rec.listener);
     ch.onState(rec.onState);
     await ch.ready();
     await broadcast("before", [`pub.${name}`], 0);
     await waitFor(() => rec.events.length === 1, "first event");
 
-    const socket = c.echo.socketId;
+    const socket = c.client.socketId;
     c.pause();
     await control("/kick", { socket });
-    await waitFor(() => c.echo.status === "reconnecting", "reconnecting");
+    await waitFor(() => c.client.status === "reconnecting", "reconnecting");
     for (let i = 1; i <= 3; i++) await broadcast("missed", [`pub.${name}`], i);
     c.resume();
 
@@ -245,7 +245,7 @@ describe("reconnection", () => {
     expect(rec.events.map((e) => e.data)).toEqual([0, 1, 2, 3]);
     expect(rec.states.map((s) => s.state)).toEqual(["subscribed", "interrupted", "recovering", "subscribed"]);
     expect(rec.lastState()?.recovered).toBe(true);
-    expect(c.echo.socketId).not.toBe(socket);
+    expect(c.client.socketId).not.toBe(socket);
     expect(c.statuses).toEqual(["reconnecting", "connected"]);
 
     await broadcast("after", [`pub.${name}`], 4);
@@ -257,13 +257,13 @@ describe("reconnection", () => {
     const name = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: name });
     const rec = new Recorder();
-    const ch = c.echo.private(name).listenAll(rec.listener);
+    const ch = c.client.private(name).listenAll(rec.listener);
     ch.onState(rec.onState);
     await ch.ready();
 
     c.pause();
-    await control("/kick", { socket: c.echo.socketId });
-    await waitFor(() => c.echo.status === "reconnecting", "reconnecting");
+    await control("/kick", { socket: c.client.socketId });
+    await waitFor(() => c.client.status === "reconnecting", "reconnecting");
     await broadcast("missed", [`prv.${name}`], 1);
     c.resume();
     await waitFor(() => rec.events.length === 1, "recovered event");
@@ -276,13 +276,13 @@ describe("reconnection", () => {
     const c = await open();
     const name = uniq("news");
     const rec = new Recorder();
-    const ch = c.echo.channel(name).listenAll(rec.listener);
+    const ch = c.client.channel(name).listenAll(rec.listener);
     ch.onState(rec.onState);
     await ch.ready();
 
     c.pause();
-    await control("/kick", { socket: c.echo.socketId });
-    await waitFor(() => c.echo.status === "reconnecting", "reconnecting");
+    await control("/kick", { socket: c.client.socketId });
+    await waitFor(() => c.client.status === "reconnecting", "reconnecting");
     await broadcast("lost", [`pub.${name}`], 1);
     // Let the stream evict the event; eviction cannot be observed from here.
     await new Promise((r) => setTimeout(r, 2 * maxAgeMs + 1000));
@@ -302,8 +302,8 @@ describe("heads", () => {
     const pubName = uniq("idle");
     const prvName = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: prvName });
-    const pub = c.echo.channel(pubName);
-    const prv = c.echo.private(prvName);
+    const pub = c.client.channel(pubName);
+    const prv = c.client.private(prvName);
     const rec = new Recorder();
     pub.onState(rec.onState);
     prv.onState(rec.onState);
@@ -319,19 +319,19 @@ describe("heads", () => {
 describe("server control", () => {
   it("stops after disconnect", async () => {
     const c = await open();
-    const stopped = new Promise<void>((r) => c.echo.onStatus((s) => s === "stopped" && r()));
+    const stopped = new Promise<void>((r) => c.client.onStatus((s) => s === "stopped" && r()));
     c.revoke();
     await control("/disconnect", { user: c.user });
     await stopped;
-    expect(c.echo.status).toBe("stopped");
-    expect(c.echo.socketId).toBe("");
+    expect(c.client.status).toBe("stopped");
+    expect(c.client.socketId).toBe("");
   });
 
   it("stops when getToken throws UnauthorizedError on reconnect", async () => {
     const c = await open();
     c.revoke();
-    await control("/kick", { socket: c.echo.socketId });
-    await waitFor(() => c.echo.status === "stopped", "stopped");
+    await control("/kick", { socket: c.client.socketId });
+    await waitFor(() => c.client.status === "stopped", "stopped");
     expect(c.statuses).toEqual(["reconnecting", "stopped"]);
   });
 
@@ -339,19 +339,19 @@ describe("server control", () => {
     const c = await open();
     const pubName = uniq("news");
     const pubRec = new Recorder();
-    const pubCh = c.echo.channel(pubName).listenAll(pubRec.listener);
+    const pubCh = c.client.channel(pubName).listenAll(pubRec.listener);
     pubCh.onState(pubRec.onState);
     await pubCh.ready();
 
     await control("/grant", { user: c.user, patterns: [`${c.user}.>`] });
-    const socket = c.echo.socketId;
+    const socket = c.client.socketId;
     await control("/refresh", { user: c.user });
-    await waitFor(() => c.echo.socketId !== socket, "new socket", 20_000);
+    await waitFor(() => c.client.socketId !== socket, "new socket", 20_000);
     expect(c.statuses).toEqual([]);
 
     const name = `${c.user}.feed`;
     const rec = new Recorder();
-    const ch = c.echo.private(name).listenAll(rec.listener);
+    const ch = c.client.private(name).listenAll(rec.listener);
     await ch.ready();
     expect(pathOf(ch)).toBe("direct");
     await broadcast("e", [`prv.${name}`, `pub.${pubName}`], 1);
@@ -365,18 +365,18 @@ describe("server control", () => {
 describe("close", () => {
   it("stops and fails new channels", async () => {
     const c = await open();
-    const echo: Echo = c.echo;
-    await echo.close();
-    expect(echo.status).toBe("stopped");
-    await expect(echo.channel(uniq("x")).ready()).rejects.toThrow(/closed/);
+    const client: Client = c.client;
+    await client.close();
+    expect(client.status).toBe("stopped");
+    await expect(client.channel(uniq("x")).ready()).rejects.toThrow(/closed/);
   });
 
   it("fails ready of channels not yet subscribed", async () => {
     const c = await open();
     const name = `orders.${uniq("o")}`;
     await control("/allow", { user: c.user, channel: name });
-    const ch = c.echo.private(name);
-    void c.echo.close();
+    const ch = c.client.private(name);
+    void c.client.close();
     await expect(ch.ready()).rejects.toThrow(/closed/);
     expect(ch.state).toBe("left");
   });
@@ -388,7 +388,7 @@ describe("request limit", () => {
     await control("/grant", { user, patterns: [`${user}.>`] });
     const before = (await control("/stats")).Overloaded as number;
     const c = await open(user);
-    const channels = Array.from({ length: 40 }, (_, i) => c.echo.private(`${user}.n${i}`));
+    const channels = Array.from({ length: 40 }, (_, i) => c.client.private(`${user}.n${i}`));
     await Promise.all(channels.map((ch) => ch.ready()));
     expect((await control("/stats")).Overloaded).toBe(before);
   });

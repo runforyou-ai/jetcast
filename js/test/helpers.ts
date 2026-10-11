@@ -1,7 +1,7 @@
 // Helpers for integration tests against jetcast-dev.
 
 import { inject } from "vitest";
-import { connect, UnauthorizedError, type ChannelState, type Echo, type EventMeta, type Status } from "../src/index.js";
+import { connect, UnauthorizedError, type ChannelState, type Client, type EventMeta, type Status } from "../src/index.js";
 
 export const wsUrl = inject("wsUrl");
 export const httpUrl = inject("httpUrl");
@@ -41,7 +41,7 @@ export async function waitFor<T>(f: () => T, what = "condition", timeout = 20_00
 
 /** A client whose getToken can be paused or made to fail. */
 export interface TestClient {
-  echo: Echo;
+  client: Client;
   user: string;
   statuses: Status[];
   /** Makes getToken wait until resume() is called. */
@@ -72,7 +72,7 @@ export async function client(user = uniq("u"), headsInterval?: number): Promise<
       revoked = true;
     },
   } as TestClient;
-  tc.echo = await connect({
+  tc.client = await connect({
     servers: wsUrl,
     logger: {},
     headsInterval,
@@ -83,7 +83,7 @@ export async function client(user = uniq("u"), headsInterval?: number): Promise<
       return `${user}:s1`;
     },
   });
-  tc.echo.onStatus((s) => tc.statuses.push(s));
+  tc.client.onStatus((s) => tc.statuses.push(s));
   return tc;
 }
 
